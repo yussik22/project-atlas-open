@@ -1,0 +1,5 @@
+# Human-approved expected behavior for this scenario.
+memory.buffer.bytes=67108864
+memory.buffer.allocations=1
+memory.buffer.owner=ModelRuntime
+memory.buffer.state=Ready

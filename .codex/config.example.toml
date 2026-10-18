@@ -1,0 +1,6 @@
+# Copy to config.toml when this repository is the task's working directory.
+# Paths are relative so this example contains no developer-machine location.
+[mcp_servers.project_atlas]
+command = "node"
+args = ["tools/atlas-mcp.mjs"]
+cwd = "."

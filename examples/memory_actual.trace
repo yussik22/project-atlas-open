@@ -1,0 +1,5 @@
+# atlas-trace-v1
+1	allocate	memory.buffer	67108864
+2	owner	memory.buffer	Cache
+3	ready	memory.buffer	Ready
+4	release	memory.buffer	0

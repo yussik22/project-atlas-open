@@ -1,0 +1,8 @@
+/build/
+/build-*/
+/dist/
+/.project-atlas/
+/.vs/
+*.user
+/node_modules/
+/.codex/config.toml

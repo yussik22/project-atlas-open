@@ -1,0 +1,11 @@
+# atlas-trace-v1
+1	var.create	stack.buffer	buffer
+2	obj.create	heap.buffer	Buffer[64]
+3	link.add	stack.buffer	owns:heap.buffer
+4	var.create	stack.alias	alias
+5	link.add	stack.alias	points_to:heap.buffer
+6	link.remove	stack.alias	points_to:heap.buffer
+7	var.destroy	stack.alias	-
+8	link.remove	stack.buffer	owns:heap.buffer
+9	obj.destroy	heap.buffer	-
+10	var.destroy	stack.buffer	-

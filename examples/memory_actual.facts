@@ -1,0 +1,5 @@
+# Example observations emitted by a test through ObservationWriter.
+memory.buffer.bytes=134217728
+memory.buffer.allocations=2
+memory.buffer.owner=ModelRuntime
+memory.buffer.state=Ready
