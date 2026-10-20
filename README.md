@@ -12,6 +12,10 @@ Choose a C++ project folder and select **Scan**. If the project has a `compile_c
 
 The separate source ZIP is a clean export without the original private Git history. Build and packaging details are in [PUBLIC_RELEASE.md](PUBLIC_RELEASE.md). Atlas is MIT-licensed; the bundled LLVM component has separate [third-party notices](THIRD_PARTY_NOTICES.md).
 
+## Feedback and ideas
+
+Found a problem? [Open a bug report](https://github.com/yussik22/project-atlas-open/issues/new/choose). Have a concrete improvement in mind? Use the feature request form in the same [Issues](https://github.com/yussik22/project-atlas-open/issues/new/choose) page. For early ideas or questions, start a conversation in [Discussions](https://github.com/yussik22/project-atlas-open/discussions). Please remove secrets and private project details before posting. See [CONTRIBUTING.md](CONTRIBUTING.md) for a short guide.
+
 ## What Atlas can do
 
 - **Navigate code:** browse files, classes, structs, members, functions, and methods with source locations and Clang diagnostics. Open original files in your configured editor and rescan after editing.

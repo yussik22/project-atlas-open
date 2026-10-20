@@ -1,0 +1,50 @@
+name: Feature request
+description: Propose a concrete improvement to Project Atlas
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For early ideas or questions, use Discussions → Ideas or Q&A. Use this form when you can describe a specific change.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - GUI and navigation
+        - UML and interactions
+        - Runtime map and recording
+        - Debugger
+        - CLI and agent tools
+        - Build or installation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and what currently gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe what Atlas should do from a user's point of view.
+    validations:
+      required: true
+  - type: textarea
+    id: success
+    attributes:
+      label: How would we know it works?
+      description: Optional example, test case, or acceptance criterion.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

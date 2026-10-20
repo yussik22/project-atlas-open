@@ -1,0 +1,65 @@
+name: Bug report
+description: Report a reproducible problem with Project Atlas
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Atlas. Please remove passwords, tokens, private source code, and personal paths from logs or screenshots before posting.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - GUI and navigation
+        - UML and interactions
+        - Runtime map and recording
+        - Debugger
+        - CLI and agent tools
+        - Build or installation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Atlas version or commit
+      placeholder: "v0.1.0 or a commit hash"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the smallest safe example you can share.
+      placeholder: "1. Open...\n2. Select...\n3. Observe..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows version, build type, compiler/LLVM version, and whether a compilation database was present, if relevant.
+    validations:
+      required: false
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics or screenshots
+      description: Paste only redacted diagnostics; attach a screenshot if it helps.
+      render: text
+    validations:
+      required: false
