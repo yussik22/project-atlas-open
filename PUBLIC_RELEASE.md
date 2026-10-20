@@ -1,6 +1,6 @@
 # Public release — Windows x64
 
-Use the prepared `ProjectAtlas-0.1.0-win-x64.zip` for a portable Windows x64
+Use the prepared `ProjectAtlas-0.11-win-x64.zip` for a portable Windows x64
 copy. Extract the whole archive, keep `libclang.dll` beside both executables,
 and run `project_atlas_gui.exe`. No LLVM or Visual C++ Debug runtime needs to
 be installed. The CLI is `project_atlas.exe`. Atlas has a native Windows GUI;

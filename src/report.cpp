@@ -1,4 +1,5 @@
 #include "atlas/atlas.hpp"
+#include "atlas/card_archive.hpp"
 #include "atlas/interactions.hpp"
 #include "atlas/symbol_identity.hpp"
 
@@ -572,7 +573,14 @@ std::expected<void, std::string> write_project_report(
     if (auto result = write_classes(scan, output_directory); !result) return result;
     if (auto result = write_calls(scan, output_directory); !result) return result;
     if (auto result = write_interactions(scan, output_directory); !result) return result;
-    return write_html(scan, output_directory);
+    if (auto result = write_html(scan, output_directory); !result) return result;
+    if (auto archived = archive_orphan_report_cards(scan.root, output_directory);
+        !archived) return std::unexpected(archived.error());
+    if (place_cards_next_to_source) {
+        if (auto archived = archive_orphan_source_cards(scan.root, output_directory);
+            !archived) return std::unexpected(archived.error());
+    }
+    return {};
 }
 
 } // namespace atlas

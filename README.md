@@ -1,103 +1,265 @@
-# Project Atlas
+# Project Atlas — native C++23 project navigator
 
-Project Atlas is a native Windows application and C++23 command-line toolkit for exploring C++ projects. It combines libclang-based source navigation, a class graph, static interaction evidence, runtime traces, and a small embedded debugger. It also exposes bounded, machine-readable context for coding agents.
+Публічний переносний білд для Windows x64 описано в
+[PUBLIC_RELEASE.md](PUBLIC_RELEASE.md). Код Atlas — MIT (`LICENSE`), а
+доданий до бінарного пакета `libclang.dll` має окрему ліцензію LLVM
+(`THIRD_PARTY_NOTICES.md`). Не робіть поточну приватну Git-історію публічною
+без її окремого аудиту; для нового репозиторію використовуйте чистий source-архів.
 
-Atlas is an early **Windows x64 preview**, not a complete C++ debugger or profiler. Scanning and browsing do not modify the project being scanned. Generating adjacent `.agent.md` cards, recording a run, or launching a debug target are explicit actions.
+Невелике автономне ядро системи для проєктів, зручних для людей і агентів.
+Воно **не змінює сканований код**. Сканер використовує `libclang` AST і створює
+короткі навігаційні картки, нативну Windows-програму, а також офлайновий
+HTML-індекс для тих, кому потрібен експорт. Окремий механізм зіставляє
+очікувані факти з фактичними спостереженнями.
 
-## Download and run
+Локальна [бібліотека рішень C++23](knowledge/cpp23/README.md) містить
+перевірені правила для проєктних рішень. Перша картка пояснює, чому
+[тотожність класу не дорівнює його хешу](knowledge/cpp23/symbol-identity.md).
 
-Download [`ProjectAtlas-0.1.0-win-x64.zip`](https://github.com/yussik22/project-atlas-open/releases/tag/v0.1.0), extract the entire archive, and run `project_atlas_gui.exe`. Keep `libclang.dll` beside the executables. The portable build does not require an LLVM installation or the Visual C++ Debug runtime. It is unsigned, so Windows may show an unknown-publisher warning.
+## Збірка
 
-Choose a C++ project folder and select **Scan**. If the project has a `compile_commands.json` in its root or in `build`, `build-clang`, or `build-ninja`, Atlas uses it automatically. Correct compilation flags and headers are important: a missing build context can produce incomplete AST results.
+Потрібні CMake 3.20+, компілятор із підтримкою C++23 і LLVM/Clang з
+`clang-c/Index.h`, імпортною бібліотекою та `libclang.dll` на Windows.
+Для власної інсталяції задайте `-DLIBCLANG_ROOT=...`. Готовий Windows x64
+архів уже містить потрібний `libclang.dll` і не вимагає компілятора.
 
-The separate source ZIP is a clean export without the original private Git history. Build and packaging details are in [PUBLIC_RELEASE.md](PUBLIC_RELEASE.md). Atlas is MIT-licensed; the bundled LLVM component has separate [third-party notices](THIRD_PARTY_NOTICES.md).
-
-## Feedback and ideas
-
-Found a problem? [Open a bug report](https://github.com/yussik22/project-atlas-open/issues/new/choose). Have a concrete improvement in mind? Use the feature request form in the same [Issues](https://github.com/yussik22/project-atlas-open/issues/new/choose) page. For early ideas or questions, start a conversation in [Discussions](https://github.com/yussik22/project-atlas-open/discussions). Please remove secrets and private project details before posting. See [CONTRIBUTING.md](CONTRIBUTING.md) for a short guide.
-
-## What Atlas can do
-
-- **Navigate code:** browse files, classes, structs, members, functions, and methods with source locations and Clang diagnostics. Open original files in your configured editor and rescan after editing.
-- **Explore relationships:** inspect an interactive UML-style class graph with inheritance and field-type edges, a selected-class detail view, a minimap, pan, zoom, and a toggle for isolated classes. The Overview tab also shows cross-file static calls.
-- **Compare expected and actual behavior:** compare `.facts` files or ordered `.trace` event streams and find the first mismatch.
-- **Inspect a runtime map:** load a `.trace` and step through variables, heap objects, and named links such as `owns` or `points_to`. The Interactions tab puts AST evidence and recorded runtime links in one view without pretending that a matching name proves a source-to-runtime identity.
-- **Debug a launched program:** on Windows x64, start a debug build, set source breakpoints, step, and inspect available stack frames and simple local values. This uses the Windows Debug API and DbgHelp; line-level information needs matching PDB files.
-- **Give agents bounded context:** request JSON project maps, symbol searches, task-focused context, exact source slices, direct file relations, and interaction evidence through the CLI or optional Node.js MCP bridge.
-
-The GUI also has a **Generate .md cards** action. It writes generated `.agent.md` files beside source files and an index under `.project-atlas/generated`. Atlas recognizes its own generated cards and does not overwrite unrelated user-authored files. Card contents are AST navigation facts, not a claim about a function's runtime behavior.
-
-## Build from source
-
-On Windows, install CMake 3.20+, Ninja, Visual Studio C++ build tools with a Windows SDK, and an LLVM installation containing `clang-cl`, `clang-c/Index.h`, the libclang import library, and `libclang.dll`. In **Developer PowerShell for Visual Studio**:
+У **Developer PowerShell for Visual Studio** на Windows:
 
 ```powershell
 cmake -S . -B build-clang -G Ninja `
   "-DLIBCLANG_ROOT=<your-LLVM-root>" `
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-cmake --build build-clang --parallel 4
+cmake --build build-clang
 ctest --test-dir build-clang --output-on-failure
 ```
 
-Run `build-clang/project_atlas_gui.exe`, optionally passing a project folder as its first argument. Atlas is a native Win32 application, not a browser-based UI. The CTest suite includes a hidden GUI smoke test that scans this project and checks the facts table and runtime graph.
+## Нативна Windows-програма
 
-For development of Atlas itself, `-DATLAS_SELF_HOST_CARDS=ON` makes a build refresh Atlas-owned adjacent cards and the generated index after C++ source changes. This option is off by default so a normal build does not write beside source files.
+Запустіть `build-clang/project_atlas_gui.exe` подвійним кліком
+або передайте каталог проєкту першим аргументом. Це самостійне
+Win32-вікно, не браузер і не HTML-обгортка. Натисніть **Choose project…**,
+виберіть каталог C++-проєкту й **Scan**. Програма показує дерево файлів,
+окрему навігацію за класами/структурами, фільтр, властивості та діагностику
+AST, попередній перегляд коду й локальну схему успадкування. **Open in editor**
+відкриває оригінальний файл у призначеній Windows-програмі; після ручної
+правки натисніть **Scan** знову. Якщо `compile_commands.json` лежить у корені,
+`build`, `build-clang` або `build-ninja`, інтерфейс використає його автоматично.
+Вкладка **Runtime map** може запустити інструментований `.exe` кнопкою
+**Record run** або завантажити готову `.trace`. Вона малює вузли, об'єкти та
+підписані зв'язки між ними; кнопки й повзунок перемикають кроки.
 
-## CLI and agent access
+Вкладка **Expected / actual** порівнює два `.facts`-файли без зміни проєкту.
+Кнопка **Generate .md cards** явно створює `.agent.md` поряд із кодом та
+індекс у `.project-atlas/generated`. Вона не перезаписує сторонні картки:
+захист на рівні ядра перевіряє маркер походження. Сканер ігнорує власний
+каталог `.project-atlas`. Картки Atlas без вихідного файлу переносяться до
+`.project-atlas/orphans/source` без втрати вмісту; чужі картки залишаються.
 
-The following examples assume a local build in `build-clang`:
+Для розробки самого Atlas можна ввімкнути `ATLAS_SELF_HOST_CARDS=ON` під час
+конфігурації CMake. Тоді звичайна збірка після зміни C++-файлів автоматично
+оновлює картки поруч із джерелами та індекс. За замовчуванням опція вимкнена:
+збірка Atlas як стороннього інструмента не повинна змінювати вихідні файли.
+Картки тепер містять також функції й методи з рядками та сигнатурами; це
+навігаційні факти AST, а не опис поведінки функцій.
 
 ```powershell
-build-clang/project_atlas.exe agent map . build-clang
-build-clang/project_atlas.exe agent find . atlas::Symbol build-clang
-build-clang/project_atlas.exe agent context . --task scan_project --budget 1500 --compile-db build-clang
-build-clang/project_atlas.exe agent source . src/scan.cpp 1 30
-build-clang/project_atlas.exe agent file-relations . src/scan.cpp build-clang
-build-clang/project_atlas.exe agent interactions . --compile-db build-clang --trace examples/runtime_memory.trace --step 5
-build-clang/project_atlas.exe agent compare examples/memory_expected.facts examples/memory_actual.facts
-build-clang/project_atlas.exe agent trace examples/memory_expected.trace examples/memory_actual.trace
+cmake -S . -B build-fixed -DATLAS_SELF_HOST_CARDS=ON
+cmake --build build-fixed
 ```
 
-`map` returns up to 200 files. `find` narrows results by path, name, call, or Clang USR. The `project-atlas.agent.v1` responses include paths, source locations, diagnostics, hashes, and `clean`/`truncated` indicators. Check those indicators before treating a result as complete. A Clang USR identifies a symbol; a display name or hash alone does not.
+Автоматичний UI smoke-тест приховано запускає вікно, сканує цей проєкт і
+перевіряє дерево, таблицю `.facts` та runtime-граф; він входить у `ctest`.
 
-`context` ranks files and symbol/call matches lexically for a task and returns hash-checked snippets. A missing match is **not** proof that code is unrelated. Its `--budget` accepts 400–4000 approximate tokens and bounds the response to four UTF-8 bytes per requested token; it is not an exact model tokenizer. If `truncated` is true, narrow the task or request an exact source range. `source` returns 1–80 numbered C/C++ lines without an AST scan and accepts an optional FNV-1a `expected-hash` to reject stale source. `file-relations` reports direct incoming and outgoing static evidence, not a complete impact map. Dynamic dispatch and indirect calls may be unresolved.
+Вкладка **UML** має інтерактивний граф класів (стрілки успадкування й типів
+полів, зокрема всередині шаблонних обгорток, вказівників і масивів) та картку вибраного класу з атрибутами, операціями й базовими
+типами. Пов'язані класи видно одразу; **Show all classes** додає ізольовані.
+Клік виділяє клас і його сусідів, подвійний клік відкриває картку; мишею можна
+переміщати граф, коліщатком або кнопками — масштабувати. **Map / reset**
+повертає читабельний початковий масштаб, а мінікарта показує всю сцену й дає
+перейти до її частини кліком. Вбудований дебагер запускає debug-збірку, ставить breakpoint,
+показує стек і доступні локальні змінні. Редагування коду всередині Atlas ще немає.
 
-The optional Node.js MCP bridge exposes nine read-only analysis tools: project map, find, context, source, file relations, interactions, facts comparison, trace comparison, and runtime map. After building the C++ CLI:
+Після повного AST-сканування вкладка **Overview** показує статичні виклики
+між файлами проєкту: хто кого викликає, перший рядок і кількість місць.
+Поруч із картками генерується [карта викликів](.project-atlas/generated/calls.md)
+із міжфайловим графом. Це статичні можливі виклики, а не доказ того, що вони
+відбулися під час запуску.
+
+Вкладка **Interactions** зводить успадкування, типи полів, статичні виклики
+та активні зв'язки завантаженого runtime trace в одну таблицю доказів.
+Кожен рядок показує походження, напрямок, кількість і початкову позицію;
+**Selected file only** звужує список до вибраного файлу, а подвійний клік
+на AST-рядку відкриває вихідний файл. Trace-вузли навмисно
+залишаються окремими від класів і файлів: однакові назви не доводять, що це
+той самий об'єкт. Генерована [карта доказів](.project-atlas/generated/interactions.md)
+містить статичний міжфайловий граф; CLI може додати до нього trace-знімок.
+
+## Прямий доступ агента
+
+CLI має JSON-режим для агентів. Він лише читає проєкт і не генерує карток:
+
+```powershell
+build-fixed/project_atlas.exe agent map . build-fixed
+build-fixed/project_atlas.exe agent find . atlas::Symbol build-fixed
+build-fixed/project_atlas.exe agent context . --task scan_project --budget 1500 --compile-db build-fixed
+build-fixed/project_atlas.exe agent source . src/scan.cpp 1 30
+build-fixed/project_atlas.exe agent file-relations . src/scan.cpp build-fixed
+build-fixed/project_atlas.exe agent interactions . --compile-db build-fixed --trace examples/runtime_memory.trace --step 5
+build-fixed/project_atlas.exe agent compare examples/memory_expected.facts examples/memory_actual.facts
+```
+
+`map` повертає до 200 файлів; `find` обмежує вибір запитом за шляхом,
+іменем, викликом або Clang USR. Результат має схему `project-atlas.agent.v1`, абсолютні
+шляхи, номери рядків, діагностику, `content_hash`, `matched_files` та
+`truncated`. Перевіряйте `clean` і `truncated` перед висновком, що символів
+більше немає. `compare` повертає ті самі розбіжності `.facts`, що й звичайна
+команда; код `2` означає діагностику Clang або розбіжності, але JSON у stdout
+залишається придатним до читання.
+`context` формує короткий пакет за задачею: ранжовані файли, збіги символів і
+викликів, рядки та хеш-перевірений однорядковий фрагмент коду. Ранжування
+лексичне, тому відсутність збігу не доводить відсутності зв’язку. `--budget`
+приймає 400–4000 і обмежує відповідь чотирма UTF-8 байтами на приблизний
+токен; це **не точний підрахунок токенізатора моделі**. При `truncated=true`
+звузьте задачу або відкрийте повну картку/код. Згенерований `index.md` тепер
+веде спершу до коротких `summaries/<file>.md`, а з них — до повних `.agent.md`.
+`source` швидко повертає точний фрагмент C/C++ файлу (1–80 рядків) без AST-сканування,
+із номерами рядків і FNV-1a хешем. Необов’язковий `expected-hash` відхиляє
+читання, якщо файл змінився після `context`/`find`. Відповідь обмежена 16 KiB;
+`truncated` означає, що слід запросити наступний діапазон. `file-relations`
+після сканування показує прямі вхідні та вихідні статичні зв’язки вибраного
+файлу з доказами й лімітом. Це кандидати для перевірки перед правкою, а не
+повна карта впливу: динамічні й непрямі виклики можуть бути відсутні.
+`files[].calls` містить рядок/колонку виклику, USR цілі за наявності,
+її файл у проєкті та прапори `dynamic_dispatch` й `indirect`.
+`interactions` повертає окрему схему `project-atlas.interactions.v1`, тип
+доказу кожного ребра, `runtime_step`, `unmapped_calls`, `capture_truncated`
+і `truncated`; статичний граф можна
+отримати без `--trace`.
+
+Локальний MCP-міст на Node.js експонує діагностику з’єднання
+`atlas_connection_status` і дев’ять інструментів аналізу:
+`atlas_project_map`, `atlas_find`, `atlas_context`, `atlas_source`,
+`atlas_file_relations`, `atlas_interactions`, `atlas_compare_facts`,
+`atlas_compare_trace`, `atlas_runtime_map`. Він запускає цей C++ CLI,
+не змінює файлів і приймає `.facts`/`.trace` тільки з вибраного робочого
+проєкту. За замовчуванням це сам Atlas. Для іншого C++-проєкту задайте
+`ATLAS_WORKSPACE_ROOT` (шлях до проєкту); шлях до інсталяції Atlas від нього
+незалежний. `ATLAS_CLI` явно задає зібраний виконуваний файл Atlas,
+`ATLAS_COMPILE_DB` — каталог із `compile_commands.json` або шлях до нього.
+Без останньої змінної міст шукає базу компіляції у корені робочого проєкту
+та його типових build-каталогах. `atlas_connection_status` показує фактично
+вибрані шляхи; `atlas_ui_list` показує відкриті вікна, а `atlas_ui_status`
+підтверджує проєкт у конкретному вікні. Після збірки CLI:
 
 ```powershell
 npm ci
 npm run test:mcp
 ```
 
-The bridge also exposes 14 `atlas_ui_*` tools for a running native window: list/status/show, load trace, set step, select tab, scan, record run, focus file or symbol, compare facts, generate cards, and UML overview/focus. Six `atlas_debug_*` tools control Atlas's embedded debugger. The local GUI control channel accepts commands only from the same Windows user. Recording runs an instrumented executable and writes a trace; debugging runs the selected debug executable. Neither is a read-only action.
+Чотирнадцять додаткових інструментів `atlas_ui_*` керують **живим нативним вікном**
+через локальний канал між CLI та GUI: `list`, `status`, `show`, `load_trace`,
+`set_step`, `select_tab`, `scan`, `record_run`, `focus_file`, `focus_symbol`,
+`compare_facts`, `generate_cards`, `uml_overview`, `uml_focus`. Шляхи у MCP передаються
+відносно вибраного `ATLAS_WORKSPACE_ROOT`; `.trace` та `.exe` перевіряються перед
+дією. Запит на файл поза робочим проєктом відхиляється навіть через посилання.
+`scan` і `record_run` асинхронні: їхній результат одразу показує стан
+`scanning`/`recording`, а завершення видно через повторний `status`.
+`record_run` **запускає вибраний `.exe` і пише новий trace**;
+`generate_cards` явно пише картки біля вихідних файлів (без перезапису
+користувацьких карток). Перед цими двома командами міст перевіряє, що вікно
+показує саме вибраний робочий проєкт, інакше відхиляє запис.
+Інші UI-команди не редагують код. Якщо відкрито кілька вікон Atlas,
+спершу викличте `atlas_ui_list` і передайте відповідний PID.
 
-The same controls are available directly from the CLI:
+Ті самі дії доступні без MCP через CLI, наприклад:
 
 ```powershell
-build-clang/project_atlas.exe agent ui list
-build-clang/project_atlas.exe agent ui load-trace examples/runtime_memory.trace
-build-clang/project_atlas.exe agent ui step 5
-build-clang/project_atlas.exe agent ui status
+build-fixed/project_atlas.exe agent ui list
+build-fixed/project_atlas.exe agent ui show
+build-fixed/project_atlas.exe agent ui load-trace examples/runtime_memory.trace
+build-fixed/project_atlas.exe agent ui step 5
+build-fixed/project_atlas.exe agent ui focus-file include/atlas/atlas.hpp
+build-fixed/project_atlas.exe agent ui focus-symbol atlas::Symbol
+build-fixed/project_atlas.exe agent ui uml-focus
+build-fixed/project_atlas.exe agent ui uml-overview
+build-fixed/project_atlas.exe agent ui compare-facts examples/memory_expected.facts examples/memory_actual.facts
+build-fixed/project_atlas.exe agent ui status
 ```
 
-If multiple Atlas windows are open, get a PID from `agent ui list` and pass it as the final argument. Scan and record requests are asynchronous; poll `status` until `scanning` or `recording` becomes false. The UI response schema is `project-atlas.ui.v1`.
+CLI повертає JSON `project-atlas.ui.v1` з активною вкладкою, вибраним файлом
+і символом, шляхом `.trace`, кроком, кількістю вузлів/зв'язків, кількістю UML-класів/зв'язків та прапорами зайнятості. Канал доступний
+лише локально процесам того самого користувача; живе вікно має бути запущене.
 
-For a local Codex MCP setup, copy `.codex/config.example.toml` to the untracked `.codex/config.toml`. The example uses relative paths and assumes the repository root as the working directory. [AGENTS.md](AGENTS.md) describes Atlas's agent workflow.
+### Вбудований дебагер
 
-## Export a project scan
+Вкладка **Debugger** і шість агентних команд `atlas_debug_*` працюють на
+Windows x64 через системний Debug API та DbgHelp. LLDB, Python runtime й
+окремий debug-сервер для цього не потрібні. Збирайте ціль з PDB-символами
+(для CMake `Debug`), інакше прив'язка до рядків та локальних змінних буде
+недоступна. Це керований дебагером запуск `.exe`, а не attach до довільного
+вже запущеного процесу.
+
+```powershell
+build-fixed/project_atlas.exe agent ui debug-launch build-fixed/project_atlas_debug_demo.exe
+# Дочекайтесь debug.phase = paused, reason = entry.
+build-fixed/project_atlas.exe agent ui debug-break examples/debugger_demo.cpp 3
+# Дочекайтесь debug.breakpoints[0].verified = true.
+build-fixed/project_atlas.exe agent ui debug-continue
+build-fixed/project_atlas.exe agent ui status
+build-fixed/project_atlas.exe agent ui debug-step
+build-fixed/project_atlas.exe agent ui debug-stop
+```
+
+`status.debug` містить поточний рядок, стек, прості локальні змінні й стан
+breakpoint. `debug-step` крокує до наступного рядка й може зайти у викликану
+функцію. Виведення локальних скалярів наразі є сирим беззнаковим значенням;
+складні типи й оптимізовані змінні можуть показувати `unavailable`. `debug-stop`
+завершує лише процес, який запустила ця сесія Atlas. У GUI ті самі дії є на
+вкладці **Debugger**.
+
+Для Codex можна скопіювати `.codex/config.example.toml` у локальний
+`.codex/config.toml`. Приклад використовує відносні шляхи та припускає, що
+робочий каталог — корінь репозиторію; локальний конфіг не відстежується Git.
+Для іншого проєкту у його конфігурації вкажіть абсолютний шлях до
+`tools/atlas-mcp.mjs` вашої інсталяції Atlas та
+`env = { ATLAS_WORKSPACE_ROOT = "<absolute-cpp-project-path>", ATLAS_CLI = "<absolute-project-atlas-exe-path>" }`.
+За потреби додайте `ATLAS_COMPILE_DB = "build-debug"`.
+MCP з'явиться в новому завданні Codex, відкритому для цього довіреного
+репозиторію; уже відкритий чат може не підхопити нове налаштування. Для
+агентів у репозиторії також є `AGENTS.md`.
+
+## Сканування
 
 ```powershell
 build-clang/project_atlas.exe scan `
   path/to/cpp-project path/to/generated-atlas path/to/cpp-project/build
 ```
 
-Open `generated-atlas/index.html` for the offline export. It includes an `index.md`, `classes.md`, and per-file `.agent.md` cards. The output directory must be empty or already contain Atlas's `.project-atlas-generated` marker; Atlas refuses to overwrite an unrelated nonempty directory. The third argument is optional and points to a `compile_commands.json` directory. Atlas reads include paths, macros, and language standard from the compilation database, but does not yet translate every compiler-driver-specific flag. Exit code `2` indicates a Clang error or a translation unit that could not be parsed.
+Відкрийте `generated-atlas/index.html`. Поруч у згенерованому дереві будуть
+`index.md`, `classes.md` і картки `src/file.cpp.agent.md`. Вихідний каталог має
+бути порожнім або вже містити маркер `.project-atlas-generated`; чужі непорожні
+каталоги сканер не перезаписує. Картки — **тільки згенеровані факти**, їх не
+слід редагувати вручну. Людські контракти зберігайте окремо. Третій аргумент
+`scan` необов'язковий: це каталог із `compile_commands.json`. Із нього
+використовуються include-шляхи, макроси та стандарт мови; непідтримувані
+прапорці конкретного драйвера поки не переносяться. Помилки Clang зазначаються
+в картках окремо від невдалого створення AST; код `2` означає, що хоча б один
+файл має Clang error або не розібрався взагалі.
 
-Use `scan-in-place` instead of `scan` only when you explicitly want generated cards beside source files. It refreshes Atlas-marked cards, but not an unrelated file with the same name. Keep human-written contracts separate from generated facts.
+Якщо потрібні картки **безпосередньо біля файлів коду**, замініть `scan` на
+`scan-in-place`. Звітний каталог все одно створюється окремо для інтерфейсу.
+Команда додає лише `file.cpp.agent.md` та не перезаписує чужий файл із такою
+назвою; повторно оновлює лише картки з маркером Project Atlas. Після
+перейменування чи видалення вихідного файлу його стару суміжну картку
+переносять до `.project-atlas/orphans/source`. Старі картки й короткі
+підсумки всередині звітного каталогу переносяться до його `.orphans` навіть
+для звичайного `scan`, який не створює суміжних карток біля коду.
 
-## Facts and traces
+## Очікуване проти фактичного
 
-A `.facts` file contains one `key=value` entry per line; `#` starts a comment. Keys may use ASCII letters, digits, `_`, `.`, and `-`. Values are compared exactly. Expected values should come from requirements or confirmed tests, not from the scanner.
+Формат `.facts`: один `key=value` на рядок, `#` починає коментар. Ключі можуть
+містити латинські літери, цифри, `_`, `.` і `-`. Значення порівнюються точно.
+Очікувані значення походять із вимог або підтверджених тестів, не зі сканера.
 
 ```powershell
 build-clang/project_atlas.exe compare `
@@ -106,67 +268,117 @@ build-clang/project_atlas.exe compare `
   build-clang/memory_comparison.md
 ```
 
-The comparison exits `0` on a match, `2` on a mismatch, and `1` on a file or invocation error. C++ tests may opt in to writing observations with `atlas::ObservationWriter`.
+Код повернення: `0` — усе збігається, `2` — є розбіжності, `1` — помилка запуску
+або файлів. У тестах C++ можна записувати спостереження через
+`atlas::ObservationWriter`; це opt-in операція, не для гарячого циклу.
 
-An ordered `.trace` starts with `# atlas-trace-v1`; each subsequent line has tab-separated `step`, `operation`, `resource`, and `value` fields. Steps start at 1 and have no gaps. They represent logical order, not wall-clock time. `atlas::TraceWriter` records these events. Trace comparison is strictly positional: an inserted or missing event is itself a divergence. For the supplied example, the first mismatch is step 2 (`Cache` instead of `ModelRuntime`).
+## Перший розрив у послідовності пам'яті
+
+Для тесту життєвого циклу `atlas::TraceWriter` записує упорядковані події у
+`.trace`. Перший рядок — `# atlas-trace-v1`; далі кожен рядок містить чотири
+поля, розділені табуляцією: `step`, `operation`, `resource`, `value`. `step`
+автоматично починається з 1 і зростає без пропусків. Це **логічний порядок**,
+не час системного годинника. Назви операції й ресурсу використовують латинські
+літери, цифри, `_`, `.` або `-`; значення не може містити табуляції чи нового
+рядка. Приклад контракту та навмисно помилкової траси є в
+`examples/memory_expected.trace` і `examples/memory_actual.trace`.
 
 ```powershell
-build-clang/project_atlas.exe agent trace `
+build-fixed/project_atlas.exe agent trace `
   examples/memory_expected.trace examples/memory_actual.trace
 ```
 
-The JSON includes `expected_count`, `actual_count`, and `first_difference`. The command exits `0` for a full match, `2` for a difference, and `1` for invalid input. The `memory_trace_test` actually allocates and releases a buffer while recording its observations.
+JSON показує `expected_count`, `actual_count` і `first_difference` з обома
+подіями; у прикладі це крок 2, де власником є `Cache` замість `ModelRuntime`.
+Код повернення `0` означає повний збіг, `2` — першу знайдену розбіжність,
+`1` — пошкоджений формат або помилку файлу. Порівняння суворо позиційне:
+додана або пропущена подія є розривом сама по собі, без спроби «вирівняти»
+подальші події. Тест `memory_trace_test` справді виділяє та звільняє буфер і
+записує його спостереження через `TraceWriter`.
 
-## Runtime map and recording
+## Runtime map: змінні, об'єкти та зв'язки
 
-`atlas::RuntimeWriter` records typed `var.create`, `obj.create`, `link.add`, `link.remove`, `var.destroy`, and `obj.destroy` events. An ID represents one entity lifetime: reusing an ID, linking a missing node, or destroying a node while a link remains active is invalid. A reused memory address does not imply the same object lifetime. Link labels such as `owns` are supplied by the test or program; Atlas does **not** infer or prove ownership from C++ source.
+### Автоматичний запис `new` / `delete`
 
-```powershell
-build-clang/project_atlas.exe agent runtime examples/runtime_memory.trace 5
-build-clang/project_atlas_gui.exe --runtime-demo . examples/runtime_memory.trace
-```
+Для Windows зберіть програму з `src/auto_runtime.cpp` у складі цільового
+виконуваного файлу. Вихідний код програми змінювати не потрібно, але її
+потрібно **перелінкувати**; звичайний, неінструментований `.exe` Atlas не
+зможе записати. Приклад для CMake:
 
-At step 5 in the example, `buffer` and `alias` both link to one object: the trace labels one edge `owns` and the other `points_to`. In the GUI, use **Load trace** on the Runtime map tab and navigate with the slider. The CLI returns the full graph; the GUI warns if it cannot fit all nodes on the canvas.
-
-On Windows, Atlas can also record global C++ `new`/`delete` from a program relinked with `src/auto_runtime.cpp`. You do not need to edit that program's source, but Atlas cannot capture an uninstrumented executable. For CMake, set `PROJECT_ATLAS_SOURCE_DIR` to your Atlas checkout and add:
+Перед цим задайте `PROJECT_ATLAS_SOURCE_DIR` як шлях до вашої копії Atlas.
 
 ```cmake
 target_sources(my_app PRIVATE "${PROJECT_ATLAS_SOURCE_DIR}/src/auto_runtime.cpp")
 ```
 
-Build with matching debug symbols/PDB to map allocation sites to functions and lines. **Record run** launches the executable, creates a new trace under `.project-atlas/captures/`, and opens it. A direct CLI example is:
+Для зручної прив'язки місць виділення до функцій і рядків збирайте з debug
+symbols/PDB. Запустіть Atlas, виберіть `.exe` у верхньому рядку вкладки
+**Runtime map** і натисніть **Record run**. Atlas сам запустить програму,
+створить нову `.trace` в `.project-atlas/captures/`, відкриє її та покаже
+послідовність виділень і звільнень. Те саме з командного рядка:
 
 ```powershell
-build-clang/project_atlas.exe capture build-clang/project_atlas_auto_demo.exe auto-demo.trace
-build-clang/project_atlas.exe agent runtime auto-demo.trace 6
+build-fixed/project_atlas.exe capture build-fixed/project_atlas_auto_demo.exe auto-demo.trace
+build-fixed/project_atlas.exe agent runtime auto-demo.trace 6
 ```
 
-Recorded allocation links are labeled `allocates`; they do **not** establish pointer ownership. When symbols are available, Atlas writes an enriched trace and retains the raw capture as `.trace.raw`. Existing traces are not overwritten. Capture stops at 10,000 events and marks the result truncated. It covers global C++ `new`/`delete`, not `malloc`, custom allocators, or allocations inside unrelated DLLs. It records one run for later playback; it is not live process control.
+Запис містить об'єкти купи, розміри, місця виклику та зв'язок `allocates`.
+Це **не** доказ володіння вказівником. Якщо символи доступні, збагачений
+файл містить імена функцій/рядки, а початковий запис збережено як `.trace.raw`.
+Atlas не перезаписує наявну `.trace`; досягнувши ліміту 10 000 подій,
+позначає захоплення як обрізане. Захоплюються глобальні C++ `new`/`delete`,
+але не `malloc`, власні алокатори чи виділення у сторонніх DLL. Це запис
+одного запуску з подальшим переглядом, а не керування живим процесом.
 
-## Embedded debugger
+### Ручний семантичний запис
 
-The Debugger tab and `atlas_debug_*` agent commands run on Windows x64 through the system Debug API and DbgHelp. Use a Debug build with matching PDB files for source breakpoints and local variables. Atlas launches the debuggee itself; it does not attach to an arbitrary running process.
+`atlas::RuntimeWriter` додає до того самого `.trace` типізовані події
+`var.create`, `obj.create`, `link.add`, `link.remove`, `var.destroy` і
+`obj.destroy`. ID описує **одне життя сутності**: повторне використання ID,
+зв'язок із неіснуючим вузлом чи знищення вузла з активним зв'язком — помилки.
+Це важливо для пам'яті: адреса може повторитися, а ID не повинен приховувати
+нове виділення. Зв'язки мають явні назви (`owns`, `points_to` тощо), але Atlas
+не виводить їх автоматично з C++ і не стверджує, що назва `owns` доведена
+аналізом коду — її записав тест або програма.
 
 ```powershell
-build-clang/project_atlas.exe agent ui debug-launch build-clang/project_atlas_debug_demo.exe
-# Wait for debug.phase = paused, reason = entry.
-build-clang/project_atlas.exe agent ui debug-break examples/debugger_demo.cpp 3
-# Confirm debug.breakpoints[0].verified = true.
-build-clang/project_atlas.exe agent ui debug-continue
-build-clang/project_atlas.exe agent ui status
-build-clang/project_atlas.exe agent ui debug-step
-build-clang/project_atlas.exe agent ui debug-stop
+build-fixed/project_atlas.exe agent runtime examples/runtime_memory.trace 5
 ```
 
-The debugger reports frames, simple local variables, source position, and breakpoint state. Optimized-out or unsupported values may be `unavailable`; simple scalar values are currently shown as raw unsigned values. `debug-stop` terminates only the process launched by that Atlas debug session.
+На кроці 5 прикладу дві змінні зв'язані з одним об'єктом: `buffer` володіє
+ним, а `alias` вказує на нього. Без номера кроку CLI повертає стан після
+останньої події. У нативній вкладці **Runtime map** виберіть цей файл і
+натисніть **Load trace**: вікно відкриє останній крок створення зв'язку, а
+повзунок і кнопки дадуть переглянути решту послідовності. Коли вузлів більше,
+ніж уміщається на полотні, UI попереджає про це; CLI повертає повний граф.
+Щоб відкрити саме цей приклад одразу у вкладці карти:
 
-## Current limitations
+```powershell
+build-fixed/project_atlas_gui.exe --runtime-demo . examples/runtime_memory.trace
+```
 
-- Without a correct compilation database and required headers, some translation units may have Clang diagnostics or incomplete ASTs.
-- The class graph covers inheritance and field types, including available template arguments, but not every template or functional dependency. Static calls do not prove which virtual target or callback ran, and code outside scanned files is absent.
-- Runtime relationships are recorded evidence, not automatic ownership inference. Automatic allocation capture needs a relinked program and is limited to global C++ `new`/`delete`.
-- `.facts` supports exact equality, not ranges or tolerances. Trace comparison is positional and covers one recorded execution.
-- The debugger is Windows x64 only and depends on the quality of PDB symbols. Atlas does not yet edit source code inside the GUI.
-- Cards for deleted source files are not removed automatically; the current generated index lists only current files.
+## Межі поточного каркаса
 
-The next research step is to connect trace events more precisely to tests and source lines, then add verifiable memory-ownership invariants.
+- `libclang` розбирає C++ семантично, але без коректної бази компіляції або
+  потрібних заголовків окремі файли можуть мати діагностику або неповне дерево.
+- Картка UML показує членів класу; загальна карта показує успадкування та
+  типи полів між класами проєкту, включно з доступними libclang аргументами
+  шаблонів, але ще не всі шаблонні чи функціональні
+  залежності. `classes.md` поки містить лише класи та базові типи.
+  Runtime map показує записані події; автоматичний
+  режим покриває лише глобальні C++ `new`/`delete` у перелінкованій програмі.
+- Статична карта викликів читає тіла функцій, але не встановлює фактичну ціль
+  віртуального виклику або callback, не бачить код поза просканованими файлами
+  і не замінює runtime-trace. Виклики стандартної бібліотеки лишаються в JSON,
+  а в компактних картках наведені лише цілі всередині проєкту.
+- Немає автоматичного визначення володіння пам'яттю або причин помилки;
+  дебагер обмежений x64 Windows і якістю доступних PDB-символів.
+- `.facts` підтримує точну рівність; діапазони й допуски ще не підтримуються.
+- `.trace` має позиційне порівняння й відтворення одного інструментованого
+  виконання; це не автоматичний профайлер і не заміна live-debugger вкладки.
+- Архів сирітських карток зберігає їхній вміст, але сам не відновлює його
+  автоматично: переглядайте `.project-atlas/orphans/source` або `.orphans`
+  у звітному каталозі, якщо потрібно повернути стару картку.
+
+Наступний крок — пов'язати trace-події з конкретними тестами й джерельними
+рядками, а тоді додати перевірювані інваріанти володіння пам'яттю.

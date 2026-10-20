@@ -1,6 +1,8 @@
 # Copy to config.toml when this repository is the task's working directory.
-# Paths are relative so this example contains no developer-machine location.
+# For another C++ workspace, use an absolute atlas-mcp.mjs path and set
+# ATLAS_WORKSPACE_ROOT. ATLAS_CLI and ATLAS_COMPILE_DB are optional overrides.
 [mcp_servers.project_atlas]
 command = "node"
 args = ["tools/atlas-mcp.mjs"]
 cwd = "."
+# env = { ATLAS_WORKSPACE_ROOT = "<absolute-cpp-project-path>", ATLAS_COMPILE_DB = "build-debug" }

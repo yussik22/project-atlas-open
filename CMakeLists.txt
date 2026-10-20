@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ProjectAtlas VERSION 0.1.0 LANGUAGES CXX)
+project(ProjectAtlas VERSION 0.11.0 LANGUAGES CXX)
 
 set(LIBCLANG_ROOT "" CACHE PATH "Root of an LLVM installation with libclang")
 if(NOT LIBCLANG_ROOT)
@@ -25,6 +25,7 @@ add_library(project_atlas_core STATIC
     src/context.cpp
     src/agent_tools.cpp
     src/report.cpp
+    src/card_archive.cpp
     src/facts.cpp
     src/agent.cpp
     src/trace.cpp

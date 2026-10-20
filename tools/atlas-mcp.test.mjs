@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const serverFile = resolve(root, 'tools/atlas-mcp.mjs');
+const cli = resolve(process.env.ATLAS_CLI ?? join(root, 'build-clang', 'project_atlas.exe'));
+const gui = resolve(process.env.ATLAS_GUI ?? join(dirname(cli), 'project_atlas_gui.exe'));
+const bridgeEnv = {
+  ...process.env, ATLAS_CLI: cli, ATLAS_WORKSPACE_ROOT: root, ATLAS_COMPILE_DB: '',
+};
 
 test('MCP tools expose Atlas map, find, interactions, facts, trace and runtime graph',
   { timeout: 480_000 }, async () => {
@@ -18,12 +23,13 @@ test('MCP tools expose Atlas map, find, interactions, facts, trace and runtime g
     command: process.execPath,
     args: [serverFile],
     cwd: root,
+    env: bridgeEnv,
   });
   await client.connect(transport);
   try {
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map(tool => tool.name).sort(),
-      ['atlas_compare_facts', 'atlas_compare_trace', 'atlas_context',
+      ['atlas_compare_facts', 'atlas_compare_trace', 'atlas_connection_status', 'atlas_context',
         'atlas_debug_breakpoint', 'atlas_debug_continue', 'atlas_debug_launch',
         'atlas_debug_status', 'atlas_debug_step', 'atlas_debug_stop',
         'atlas_file_relations', 'atlas_find', 'atlas_interactions', 'atlas_project_map',
@@ -32,6 +38,12 @@ test('MCP tools expose Atlas map, find, interactions, facts, trace and runtime g
         'atlas_ui_list', 'atlas_ui_load_trace', 'atlas_ui_record_run', 'atlas_ui_scan',
         'atlas_ui_select_tab', 'atlas_ui_set_step', 'atlas_ui_show', 'atlas_ui_status',
         'atlas_ui_uml_focus', 'atlas_ui_uml_overview']);
+
+    const connected = await client.callTool({ name: 'atlas_connection_status', arguments: {} });
+    assert.equal(connected.isError, undefined);
+    const connection = connected.structuredContent ?? JSON.parse(connected.content[0].text);
+    assert.equal(connection.workspace_root, realpathSync(root));
+    assert.equal(connection.cli, cli);
 
     const mapped = await client.callTool({ name: 'atlas_project_map', arguments: {} },
       { timeout: 120_000 });
@@ -152,14 +164,107 @@ test('MCP tools expose Atlas map, find, interactions, facts, trace and runtime g
   }
 });
 
+test('MCP controls a separate configured C++ workspace, including the GUI',
+  { timeout: 120_000, skip: process.platform !== 'win32' }, async () => {
+    const fixtureBase = join(root, 'atlas-test-workspace');
+    mkdirSync(fixtureBase, { recursive: true });
+    const fixtureRoot = realpathSync(fixtureBase);
+    const relativeRoot = relative(realpathSync(root), fixtureRoot);
+    assert.ok(relativeRoot && relativeRoot !== '..' && !relativeRoot.startsWith('..\\'));
+    const workspace = mkdtempSync(join(fixtureBase, 'mcp-external-'));
+    const sourceFile = join(workspace, 'demo.cpp');
+    writeFileSync(sourceFile, 'struct ExternalWidget { int value() const { return 7; } };\nint main() { ExternalWidget widget; return widget.value(); }\n');
+    writeFileSync(join(workspace, 'compile_commands.json'), JSON.stringify([{
+      directory: workspace, file: sourceFile,
+      arguments: ['clang++', '-std=c++23', '-c', sourceFile],
+    }]));
+    const child = spawn(gui, [], { cwd: root, windowsHide: true, stdio: 'ignore' });
+    const client = new Client({ name: 'atlas-external-workspace-test', version: '0.1.0' });
+    const transport = new StdioClientTransport({
+      command: process.execPath, args: [serverFile], cwd: root,
+      env: { ...bridgeEnv, ATLAS_WORKSPACE_ROOT: workspace },
+    });
+    const call = async (name, args = {}) => {
+      const result = await client.callTool({ name, arguments: args }, { timeout: 60_000 });
+      return { result, data: result.structuredContent ?? JSON.parse(result.content[0].text) };
+    };
+    try {
+      await client.connect(transport);
+      const connection = await call('atlas_connection_status');
+      assert.equal(connection.result.isError, undefined);
+      assert.equal(connection.data.workspace_root, realpathSync(workspace));
+      assert.equal(connection.data.compilation_database, realpathSync(workspace));
+      const mapped = await call('atlas_project_map');
+      assert.equal(mapped.result.isError, undefined);
+      assert.equal(mapped.data.root, realpathSync(workspace).replaceAll('\\', '/'));
+      assert.equal(mapped.data.summary.file_count, 1);
+      const found = await call('atlas_find', { query: 'ExternalWidget' });
+      assert.equal(found.result.isError, undefined);
+      assert.ok(found.data.matched_files > 0);
+      const source = await call('atlas_source', { file: 'demo.cpp', start: 1, count: 1 });
+      assert.equal(source.result.isError, undefined);
+      assert.match(source.data.lines[0].text, /ExternalWidget/);
+      const escaped = await client.callTool({
+        name: 'atlas_source',
+        arguments: { file: '../src/scan.cpp', start: 1, count: 1 },
+      });
+      assert.equal(escaped.isError, true);
+      const until = Date.now() + 20_000;
+      let status;
+      do {
+        status = await call('atlas_ui_status', { pid: child.pid });
+        if (!status.result.isError && status.data.ok) break;
+        await new Promise(done => setTimeout(done, 150));
+      } while (Date.now() < until);
+      assert.equal(status.result.isError, undefined);
+      const scanning = await call('atlas_ui_scan', { pid: child.pid });
+      assert.equal(scanning.result.isError, undefined);
+      const scanDeadline = Date.now() + 60_000;
+      do {
+        status = await call('atlas_ui_status', { pid: child.pid });
+        if (!status.result.isError && !status.data.scanning &&
+            status.data.project_root === workspace) break;
+        await new Promise(done => setTimeout(done, 150));
+      } while (Date.now() < scanDeadline);
+      assert.equal(status.data.project_root, workspace);
+      assert.equal(status.data.scanning, false);
+      const focused = await call('atlas_ui_focus_file', { file: 'demo.cpp', pid: child.pid });
+      assert.equal(focused.result.isError, undefined);
+      assert.equal(focused.data.selected_file, 'demo.cpp');
+      const otherClient = new Client({ name: 'atlas-mismatched-workspace-test', version: '0.1.0' });
+      const otherTransport = new StdioClientTransport({
+        command: process.execPath, args: [serverFile], cwd: root, env: bridgeEnv,
+      });
+      try {
+        await otherClient.connect(otherTransport);
+        const refused = await otherClient.callTool({
+          name: 'atlas_ui_generate_cards', arguments: { pid: child.pid },
+        });
+        assert.equal(refused.isError, true);
+        assert.match((refused.structuredContent ?? JSON.parse(refused.content[0].text)).error,
+          /different project/);
+      } finally {
+        await otherClient.close();
+      }
+    } finally {
+      child.kill();
+      await client.close();
+      const resolvedWorkspace = realpathSync(workspace);
+      const relativeFixture = relative(fixtureRoot, resolvedWorkspace);
+      if (relativeFixture && relativeFixture !== '..' &&
+          !relativeFixture.startsWith('..\\')) {
+        rmSync(resolvedWorkspace, { recursive: true, force: true });
+      }
+    }
+  });
+
 test('MCP controls the live native GUI and embedded debugger without UI clicks',
   { timeout: 300_000, skip: process.platform !== 'win32' }, async () => {
-    const gui = process.env.ATLAS_GUI ?? join(root, 'build-fixed', 'project_atlas_gui.exe');
     assert.ok(existsSync(gui), `GUI executable missing: ${gui}`);
     const child = spawn(gui, [], { cwd: root, windowsHide: true, stdio: 'ignore' });
     const client = new Client({ name: 'atlas-live-control-test', version: '0.1.0' });
     const transport = new StdioClientTransport({
-      command: process.execPath, args: [serverFile], cwd: root,
+      command: process.execPath, args: [serverFile], cwd: root, env: bridgeEnv,
     });
     await client.connect(transport);
     const call = async (name, args = {}) => {
@@ -183,7 +288,7 @@ test('MCP controls the live native GUI and embedded debugger without UI clicks',
       const prematureCards = await call('atlas_ui_generate_cards', { pid: child.pid });
       assert.equal(prematureCards.result.isError, true);
       const debugLaunch = await call('atlas_debug_launch', {
-        executable: 'build-fixed/project_atlas_debug_demo.exe', pid: child.pid,
+        executable: `${relative(root, dirname(cli)).replaceAll('\\', '/')}/project_atlas_debug_demo.exe`, pid: child.pid,
       });
       assert.equal(debugLaunch.result.isError, undefined);
       assert.equal(debugLaunch.data.active_tab, 5);
@@ -223,16 +328,16 @@ test('MCP controls the live native GUI and embedded debugger without UI clicks',
       assert.equal(tabbed.data.active_tab, 3);
       const prematureUmlFocus = await call('atlas_ui_uml_focus', { pid: child.pid });
       assert.equal(prematureUmlFocus.result.isError, true);
+      const scanning = await call('atlas_ui_scan', { pid: child.pid });
+      assert.equal(scanning.result.isError, undefined);
+      await waitFor(data => !data.scanning && data.project_root === root, 120_000);
       const recorded = await call('atlas_ui_record_run', {
-        executable: 'build-fixed/project_atlas_auto_demo.exe', pid: child.pid,
+        executable: `${relative(root, dirname(cli)).replaceAll('\\', '/')}/project_atlas_auto_demo.exe`, pid: child.pid,
       });
       assert.equal(recorded.result.isError, undefined);
       const afterRecord = await waitFor(data => !data.recording &&
         data.trace_path.includes('.project-atlas') && data.active_tab === 4);
       assert.equal(afterRecord.total_steps, 10);
-      const scanning = await call('atlas_ui_scan', { pid: child.pid });
-      assert.equal(scanning.result.isError, undefined);
-      await waitFor(data => !data.scanning && data.project_root === root, 120_000);
       const umlOverview = await call('atlas_ui_uml_overview', { pid: child.pid });
       assert.equal(umlOverview.result.isError, undefined);
       assert.equal(umlOverview.data.uml_overview, true);

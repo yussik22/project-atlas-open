@@ -1,6 +1,6 @@
 param(
     [string]$BuildDirectory = 'build-public',
-    [string]$Version = '0.1.0'
+    [string]$Version = '0.11'
 )
 
 Set-StrictMode -Version Latest
@@ -84,7 +84,12 @@ foreach ($atlasSpec in @(
     foreach ($atlasFile in Get-ChildItem -LiteralPath $atlasFolder -File -Recurse) {
         if ($atlasFile.Extension -notin $atlasSpec.Extensions) { continue }
         if ($atlasFile.Name.EndsWith('.agent.md')) { continue }
-        $atlasRelative = [IO.Path]::GetRelativePath($atlasRoot, $atlasFile.FullName)
+        $atlasRootPrefix = $atlasRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if (-not $atlasFile.FullName.StartsWith($atlasRootPrefix,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Source file is outside the Atlas checkout: $($atlasFile.FullName)"
+        }
+        $atlasRelative = $atlasFile.FullName.Substring($atlasRootPrefix.Length)
         Copy-AtlasFile $atlasRelative $atlasSourceStage
     }
 }

@@ -61,7 +61,13 @@ not scan the AST. Use `agent file-relations` to inspect direct incoming and
 outgoing AST evidence for one file before editing. It does scan the project;
 its edges are not a complete impact or runtime dependency map.
 
-The nine analysis `atlas_*` MCP tools are read-only. Fourteen `atlas_ui_*` tools
+`atlas_connection_status` reports the bridge's installation root, configured
+workspace root, CLI executable and compilation database. Set
+`ATLAS_WORKSPACE_ROOT` when using Atlas for another C++ project; it defaults to
+this Atlas checkout. `ATLAS_CLI` may select a specific binary, and
+`ATLAS_COMPILE_DB` may select that workspace's compile database. Keep the
+installation root separate from the workspace root. The nine analysis
+`atlas_*` MCP tools are read-only. Fourteen `atlas_ui_*` tools
 control a running native Atlas window through a local, same-user IPC channel:
 list/status/show, load trace, set step, select tab, scan, record run, focus file or
 symbol, compare facts, and explicitly generate cards. `record_run`
@@ -70,6 +76,8 @@ only within the user's intended project. Scan/record are asynchronous: poll
 `atlas_ui_status` until `scanning`/`recording` becomes false. If multiple GUI
 instances exist, select one by PID from `atlas_ui_list`. UI status reports
 live state and selected file/symbol, not a cached CLI approximation.
+The bridge rejects record/card writes when the GUI's project differs from the
+configured workspace; scan the intended workspace in that GUI first.
 `atlas_ui_generate_cards` writes beside source files; invoke it only when asked.
 The six `atlas_debug_*` MCP tools use Atlas's embedded x64 Windows debugger;
 they do not launch LLDB. Launching executes the chosen project executable and
@@ -82,6 +90,10 @@ Preserve user-owned `.agent.md` cards and `.facts`. The user has explicitly
 authorized automatic regeneration of Atlas's own generated cards after code
 changes. This checkout enables `ATLAS_SELF_HOST_CARDS`: a normal build refreshes
 the adjacent cards and `.project-atlas/generated` if C++ sources changed.
+Generated cards for deleted or renamed source files move to the recoverable
+`.project-atlas/orphans/source` archive; stale report cards and summaries move
+to the report directory's `.orphans`. Do not treat archived cards as current
+source evidence.
 On a new checkout, enable this with
 `cmake -S . -B build-fixed -DATLAS_SELF_HOST_CARDS=ON` before building.
 Verify the card stamp/content hash after the build; never edit generated cards

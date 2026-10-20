@@ -1251,7 +1251,9 @@ atlas::UiReply App::handle_ui_command(const atlas::UiCommand& command) {
                 ? symbol.name : symbol.qualified_name);
         }
     }
-    if (!copy_ui_text(reply.project_root, window_text(root_)) ||
+    // The editable path field may differ from the project actually loaded.
+    // Agent commands must see the scanned project, not an uncommitted input.
+    if (!copy_ui_text(reply.project_root, project_ ? project_->root.wstring() : L"") ||
         !copy_ui_text(reply.trace_path, window_text(runtime_path_)) ||
         !copy_ui_text(reply.selected_file, selected_file) ||
         !copy_ui_text(reply.selected_symbol, selected_symbol) ||

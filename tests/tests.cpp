@@ -222,6 +222,92 @@ void scan_and_report_test(const std::filesystem::path& workspace) {
           "unowned file was modified");
 }
 
+void orphan_card_archive_test(const std::filesystem::path& workspace) {
+    const auto root = workspace / "orphan-cards";
+    check(root.filename() == "orphan-cards" &&
+              std::filesystem::weakly_canonical(root).parent_path() ==
+                  std::filesystem::weakly_canonical(workspace),
+          "test fixture path escaped its workspace");
+    std::error_code reset_error;
+    std::filesystem::remove_all(root, reset_error);
+    check(!reset_error, "cannot reset orphan-card test fixture");
+    const auto old_source = root / "src" / "old.cpp";
+    const auto new_source = root / "src" / "new.cpp";
+    const auto reports = root / "reports";
+    write_text(old_source, "struct OldType {};\n");
+    write_text(root / "src" / "manual.cpp.agent.md", "Human-owned notes\n");
+    write_text(root / "build" / "removed.cpp.agent.md",
+               "<!-- Project Atlas generated card -->\nBuild-owned fixture\n");
+    auto scan = atlas::scan_project(root);
+    check(scan && scan->files.size() == 1 &&
+              atlas::write_project_report(*scan, reports, true).has_value(),
+          "initial in-place report failed");
+    const auto adjacent = root / "src" / "old.cpp.agent.md";
+    const auto original = read_text(adjacent);
+    check(!original.empty(), "initial adjacent card missing");
+
+    std::filesystem::rename(old_source, new_source);
+    scan = atlas::scan_project(root);
+    check(scan && scan->files.size() == 1 &&
+              atlas::write_project_report(*scan, reports, true).has_value(),
+          "report after source rename failed");
+    const auto archived = root / ".project-atlas" / "orphans" / "source" /
+                          "src" / "old.cpp.agent.md";
+    check(!std::filesystem::exists(adjacent) && read_text(archived) == original &&
+              std::filesystem::exists(root / "src" / "new.cpp.agent.md"),
+          "renamed source did not archive its old adjacent card");
+    check(!std::filesystem::exists(reports / "src" / "old.cpp.agent.md") &&
+              std::filesystem::exists(reports / ".orphans" / "src" /
+                                      "old.cpp.agent.md") &&
+              !std::filesystem::exists(reports / "summaries" / "src" / "old.cpp.md") &&
+              std::filesystem::exists(reports / ".orphans" / "summaries" /
+                                      "src" / "old.cpp.md"),
+          "report retained stale generated card or summary");
+    check(read_text(reports / "index.md").find("old.cpp") == std::string::npos &&
+              read_text(reports / "index.md").find("new.cpp") != std::string::npos,
+          "report index retained a deleted source");
+    check(std::filesystem::exists(root / "src" / "manual.cpp.agent.md") &&
+              std::filesystem::exists(root / "build" / "removed.cpp.agent.md"),
+          "archive moved a user-owned or ignored-directory card");
+
+    write_text(adjacent, original);
+    check(atlas::write_project_report(*scan, reports, true).has_value() &&
+              !std::filesystem::exists(adjacent) &&
+              read_text(std::filesystem::path(archived.string() + ".1")) == original,
+          "archive overwrote an earlier card instead of preserving both copies");
+
+    const auto standalone_root = workspace / "report-only-orphans";
+    const auto standalone_output = workspace / "report-only-output";
+    check(standalone_root.filename() == "report-only-orphans" &&
+              standalone_output.filename() == "report-only-output" &&
+              std::filesystem::weakly_canonical(standalone_root).parent_path() ==
+                  std::filesystem::weakly_canonical(workspace) &&
+              std::filesystem::weakly_canonical(standalone_output).parent_path() ==
+                  std::filesystem::weakly_canonical(workspace),
+          "standalone test fixture escaped its workspace");
+    std::filesystem::remove_all(standalone_root, reset_error);
+    check(!reset_error, "cannot reset standalone source fixture");
+    std::filesystem::remove_all(standalone_output, reset_error);
+    check(!reset_error, "cannot reset standalone report fixture");
+    write_text(standalone_root / "retired.cpp", "int retired() { return 1; }\n");
+    auto standalone_scan = atlas::scan_project(standalone_root);
+    check(standalone_scan &&
+              atlas::write_project_report(*standalone_scan, standalone_output).has_value(),
+          "standalone report generation failed");
+    std::filesystem::rename(standalone_root / "retired.cpp",
+                            standalone_root / "current.cpp");
+    standalone_scan = atlas::scan_project(standalone_root);
+    check(standalone_scan &&
+              atlas::write_project_report(*standalone_scan, standalone_output).has_value(),
+          "standalone report refresh failed");
+    check(!std::filesystem::exists(standalone_root / ".project-atlas") &&
+              std::filesystem::exists(standalone_output / ".orphans" /
+                                      "retired.cpp.agent.md") &&
+              std::filesystem::exists(standalone_output / ".orphans" /
+                                      "summaries" / "retired.cpp.md"),
+          "standalone scan changed source tree or failed to archive stale reports");
+}
+
 void interaction_evidence_test() {
     atlas::ProjectScan scan;
     scan.files.resize(2);
@@ -791,6 +877,7 @@ int main() {
     try {
         const auto workspace = std::filesystem::current_path() / "atlas-test-workspace";
         scan_and_report_test(workspace);
+        orphan_card_archive_test(workspace);
         interaction_evidence_test();
         wrapped_field_graph_test(workspace);
         dispatch_call_test(workspace);
