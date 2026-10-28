@@ -21,6 +21,7 @@ public:
                     std::string& error);
     bool resume(bool single_step, std::string& error);
     bool stop(std::string& error);
+    [[nodiscard]] bool active() const;
     [[nodiscard]] std::string snapshot_json() const;
     [[nodiscard]] std::string snapshot_text() const;
     [[nodiscard]] std::string summary() const;

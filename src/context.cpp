@@ -60,7 +60,7 @@ std::vector<std::string> task_terms(std::string_view task) {
     };
     for (unsigned char c : task) {
         if (std::isalnum(c) || c == '_' || c == '/' || c == '.' || c >= 0x80) {
-            current += static_cast<char>(c);
+            current += static_cast<char>(c < 0x80 ? std::tolower(c) : c);
         } else finish();
     }
     finish();
@@ -115,8 +115,13 @@ std::string file_json(const ProjectScan& scan, const Match& match) {
             return hash.str();
         }())
         << ",\"parsed\":" << (file.parsed ? "true" : "false")
+        << ",\"build_context_complete\":" <<
+            (file.build_context_complete ? "true" : "false")
         << ",\"errors\":" << file.error_diagnostic_count
         << ",\"warnings\":" << file.warning_diagnostic_count
+        << ",\"symbol_matches\":" << match.symbols.size()
+        << ",\"function_matches\":" << match.functions.size()
+        << ",\"call_matches\":" << match.calls.size()
         << ",\"symbols\":[";
     for (std::size_t i = 0; i < std::min<std::size_t>(match.symbols.size(), 2); ++i) {
         const auto& symbol = file.symbols[match.symbols[i]];
@@ -124,14 +129,16 @@ std::string file_json(const ProjectScan& scan, const Match& match) {
         out << "{\"name\":" << quote(symbol.qualified_name.empty() ?
             symbol.name : symbol.qualified_name) << ",\"line\":" << symbol.line << '}';
     }
-    out << "],\"functions\":[";
+    out << "],\"returned_symbols\":" << std::min<std::size_t>(match.symbols.size(), 2)
+        << ",\"functions\":[";
     for (std::size_t i = 0; i < std::min<std::size_t>(match.functions.size(), 3); ++i) {
         const auto& function = file.functions[match.functions[i]];
         if (i) out << ',';
         out << "{\"name\":" << quote(function.qualified_name)
             << ",\"line\":" << function.line << '}';
     }
-    out << "],\"calls\":[";
+    out << "],\"returned_functions\":" << std::min<std::size_t>(match.functions.size(), 3)
+        << ",\"calls\":[";
     for (std::size_t i = 0; i < std::min<std::size_t>(match.calls.size(), 2); ++i) {
         const auto& call = file.calls[match.calls[i]];
         if (i) out << ',';
@@ -139,7 +146,7 @@ std::string file_json(const ProjectScan& scan, const Match& match) {
             << ",\"callee\":" << quote(call.callee_name)
             << ",\"line\":" << call.line << '}';
     }
-    out << ']';
+    out << "],\"returned_calls\":" << std::min<std::size_t>(match.calls.size(), 2);
     std::size_t source_line = 0;
     if (!match.functions.empty()) source_line = file.functions[match.functions[0]].line;
     else if (!match.symbols.empty()) source_line = file.symbols[match.symbols[0]].line;
@@ -199,10 +206,17 @@ std::string agent_context_json(const ProjectScan& scan, std::string_view task,
            << ",\"task\":" << quote(task)
            << ",\"approx_token_budget\":" << approximate_token_budget
            << ",\"max_utf8_bytes\":" << byte_cap
-           << ",\"clean\":" << (errors == 0 && failures == 0 ? "true" : "false")
+           << ",\"parse_clean\":" << (scan_parse_clean(scan) ? "true" : "false")
+           << ",\"coverage_complete\":" << (scan_coverage_complete(scan) ? "true" : "false")
+           << ",\"clean\":" << (scan_coverage_complete(scan) ? "true" : "false")
            << ",\"ast_failures\":" << failures
            << ",\"clang_errors\":" << errors
            << ",\"clang_warnings\":" << warnings
+           << ",\"skipped_large_count\":" << scan.skipped_large_files.size()
+           << ",\"build_context_incomplete_files\":" <<
+               std::ranges::count_if(scan.files, [](const SourceFile& file) {
+                   return !file.build_context_complete;
+               })
            << ",\"search_terms\":" << terms.size()
            << ",\"matched_files\":" << matches.size() << ",\"files\":[";
     std::string output = prefix.str();
@@ -216,8 +230,14 @@ std::string agent_context_json(const ProjectScan& scan, std::string_view task,
         output += item;
         ++returned;
     }
+    const bool nested_truncated = std::ranges::any_of(
+        matches.begin(), matches.begin() + static_cast<std::ptrdiff_t>(returned),
+        [](const Match& match) {
+            return match.symbols.size() > 2 || match.functions.size() > 3 ||
+                   match.calls.size() > 2;
+        });
     output += "],\"returned_files\":" + std::to_string(returned) +
-        ",\"truncated\":" + (returned < matches.size() ? "true" : "false") +
+        ",\"truncated\":" + (returned < matches.size() || nested_truncated ? "true" : "false") +
         ",\"ranking\":\"lexical; verify source before editing\""
         ",\"budget_note\":\"UTF-8 byte cap; actual model tokens may differ\"}";
     return output;

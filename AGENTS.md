@@ -4,7 +4,10 @@ This repository is a C++23/libclang project navigator. Use the Atlas machine-rea
 CLI before broad source searches when locating symbols or understanding the AST.
 
 For a task-specific overview, start with `agent context` and its `clean` and
-`truncated` flags. Its ranking is lexical, its token budget approximate, and a
+`truncated` flags. `clean` means coverage complete; `parse_clean` only covers
+Clang parsing of visited files. Inspect skipped files and ignored compile
+arguments when coverage is incomplete. `truncated` includes nested match caps.
+Its ranking is lexical, its token budget approximate, and a
 missing result is not proof that code is unrelated. Then read
 `.project-atlas/generated/index.md` and the linked `summaries/<file>.md` for a
 relevant file. Expand to its full `*.agent.md` card and source only as needed.

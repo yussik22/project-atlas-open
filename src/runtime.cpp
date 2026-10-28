@@ -86,13 +86,21 @@ std::expected<RuntimeSnapshot, std::string> replay_runtime(
     std::set<std::string> used_ids;
     std::set<LinkKey> links;
     bool capture_truncated = false;
+    std::string test_id;
     for (std::size_t i = 0; i < through_step; ++i) {
         const auto& event = trace[i];
         if (event.step != i + 1) {
             return std::unexpected(error_at(i + 1, "trace steps are not consecutive"));
         }
         const auto op = event.operation;
-        if (op == "var.create" || op == "obj.create" || op == "site.create") {
+        if (op == "test.context") {
+            if (event.step != 1 || event.resource != "test" ||
+                event.value.size() > 127 || !valid_id(event.value) ||
+                !test_id.empty()) {
+                return std::unexpected(error_at(event.step, "invalid test context"));
+            }
+            test_id = event.value;
+        } else if (op == "var.create" || op == "obj.create" || op == "site.create") {
             if (!valid_id(event.resource) || event.value.empty()) {
                 return std::unexpected(error_at(event.step, "invalid node ID or label"));
             }
@@ -102,7 +110,9 @@ std::expected<RuntimeSnapshot, std::string> replay_runtime(
             const auto kind = op == "var.create" ? RuntimeNodeKind::variable
                             : op == "site.create" ? RuntimeNodeKind::site
                                                   : RuntimeNodeKind::object;
-            active.emplace(event.resource, RuntimeNode{event.resource, event.value, kind});
+            active.emplace(event.resource, RuntimeNode{
+                event.resource, event.value, kind,
+                event.source_file, event.source_line});
         } else if (op == "var.destroy" || op == "obj.destroy") {
             const auto found = active.find(event.resource);
             const auto wanted = op == "var.destroy" ? RuntimeNodeKind::variable
@@ -137,6 +147,9 @@ std::expected<RuntimeSnapshot, std::string> replay_runtime(
             // The recorder stopped at its bounded event limit. The preceding
             // graph remains a valid historical snapshot, not a final state.
             capture_truncated = true;
+        } else if (op == "capture.complete" && event.resource == "capture" &&
+                   event.value == "ok" && i + 1 == trace.size()) {
+            // Automatic capture is complete only when this terminal record is present.
         } else {
             return std::unexpected(error_at(event.step, "unknown runtime operation"));
         }
@@ -145,6 +158,7 @@ std::expected<RuntimeSnapshot, std::string> replay_runtime(
     snapshot.step = through_step;
     snapshot.total_steps = trace.size();
     snapshot.capture_truncated = capture_truncated;
+    snapshot.test_id = std::move(test_id);
     for (const auto& [id, node] : active) snapshot.nodes.push_back(node);
     for (const auto& [source, target, relation] : links) {
         snapshot.links.push_back({source, target, relation});

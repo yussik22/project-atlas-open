@@ -1,6 +1,6 @@
 param(
     [string]$BuildDirectory = 'build-public',
-    [string]$Version = '0.11'
+    [string]$Version = '0.11.1'
 )
 
 Set-StrictMode -Version Latest
@@ -65,6 +65,7 @@ foreach ($atlasFile in Get-ChildItem -LiteralPath (Join-Path $atlasRoot 'example
 # package caches, reports, symbols, and any future file not reviewed here.
 $atlasRootFiles = @(
     '.gitignore', 'AGENTS.md', 'CMakeLists.txt', 'LICENSE', 'README.md',
+    'README.uk.md',
     'PUBLIC_RELEASE.md', 'THIRD_PARTY_NOTICES.md',
     'package.json', 'package-lock.json', '.codex/config.example.toml',
     'third_party/llvm/LICENSE.txt'

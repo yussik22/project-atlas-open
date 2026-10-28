@@ -16,6 +16,8 @@ struct RuntimeNode {
     std::string id;
     std::string label;
     RuntimeNodeKind kind;
+    std::string source_file;
+    std::size_t source_line = 0;
 };
 
 struct RuntimeLink {
@@ -28,6 +30,7 @@ struct RuntimeSnapshot {
     std::size_t step = 0;
     std::size_t total_steps = 0;
     bool capture_truncated = false;
+    std::string test_id;
     std::vector<RuntimeNode> nodes;
     std::vector<RuntimeLink> links;
 };

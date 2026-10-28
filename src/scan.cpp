@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <iterator>
 #include <set>
 #include <string_view>
 #include <system_error>
@@ -436,12 +437,43 @@ void collect_diagnostics(CXTranslationUnit unit, SourceFile& file) {
     }
 }
 
+std::expected<std::vector<std::string>, std::string> response_arguments(
+    const fs::path& path) {
+    std::error_code ec;
+    const auto size = fs::file_size(path, ec);
+    if (ec || size > 256 * 1024)
+        return std::unexpected("response file is missing or exceeds 256 KiB");
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return std::unexpected("cannot open response file");
+    const std::string text{std::istreambuf_iterator<char>{input}, {}};
+    std::vector<std::string> result;
+    std::string current;
+    char quote = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char ch = text[i];
+        if (ch == '\\' && i + 1 < text.size() && text[i + 1] == quote && quote) {
+            current += text[++i];
+        } else if (ch == '"' || ch == '\'') {
+            if (!quote) quote = ch;
+            else if (quote == ch) quote = 0;
+            else current += ch;
+        } else if (!quote && std::isspace(static_cast<unsigned char>(ch))) {
+            if (!current.empty()) { result.push_back(std::move(current)); current.clear(); }
+        } else current += ch;
+    }
+    if (quote || input.bad()) return std::unexpected("malformed response file");
+    if (!current.empty()) result.push_back(std::move(current));
+    return result;
+}
+
 void parse_ast(const fs::path& path, const fs::path& root, CXIndex index,
                CXCompilationDatabase database, SourceFile& file) {
     std::vector<std::string> arguments;
     fs::path working_directory;
     const auto path_string = utf8_path(path);
-    const auto extension = path.extension().string();
+    auto extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     const bool header = extension == ".h" || extension == ".hh" ||
                         extension == ".hpp" || extension == ".hxx" ||
                         extension == ".ipp";
@@ -456,12 +488,40 @@ void parse_ast(const fs::path& path, const fs::path& root, CXIndex index,
     }
     if (commands.value && clang_CompileCommands_getSize(commands.value) > 0) {
         file.used_compile_command = true;
+        file.build_context_complete = true;
+        file.compile_command_count = clang_CompileCommands_getSize(commands.value);
+        if (file.compile_command_count > 1) {
+            file.build_context_complete = false;
+            file.diagnostics.push_back("Multiple compile commands; first configuration selected");
+        }
         const auto command = clang_CompileCommands_getCommand(commands.value, 0);
         working_directory = from_utf8(cx_text(clang_CompileCommand_getDirectory(command)));
         const auto count = clang_CompileCommand_getNumArgs(command);
+        std::vector<std::string> command_arguments;
+        for (unsigned i = 1; i < count; ++i)
+            command_arguments.push_back(cx_text(clang_CompileCommand_getArg(command, i)));
+        for (std::size_t i = 0; i < command_arguments.size();) {
+            if (!command_arguments[i].starts_with('@')) { ++i; continue; }
+            const auto response = from_utf8(std::string_view(command_arguments[i]).substr(1));
+            const auto resolved = response.is_absolute() ? response : working_directory / response;
+            auto expanded = response_arguments(resolved);
+            if (!expanded || std::ranges::any_of(*expanded,
+                    [](const std::string& value) { return value.starts_with('@'); })) {
+                file.build_context_complete = false;
+                file.ignored_compile_arguments.push_back(command_arguments[i]);
+                command_arguments.erase(command_arguments.begin() + static_cast<std::ptrdiff_t>(i));
+                continue;
+            }
+            command_arguments.erase(command_arguments.begin() + static_cast<std::ptrdiff_t>(i));
+            command_arguments.insert(command_arguments.begin() + static_cast<std::ptrdiff_t>(i),
+                                     expanded->begin(), expanded->end());
+            i += expanded->size();
+        }
         arguments.reserve(count + 3);
-        for (unsigned i = 1; i < count; ++i) {
-            const auto arg = cx_text(clang_CompileCommand_getArg(command, i));
+        for (std::size_t i = 0; i < command_arguments.size(); ++i) {
+            const auto& original = command_arguments[i];
+            const std::string arg = original.starts_with("-clang:")
+                ? original.substr(7) : original;
             auto take_value = [&](std::string_view output_flag,
                                   std::string_view option, bool path_argument) {
                 auto append = [&](std::string value) {
@@ -473,8 +533,8 @@ void parse_ast(const fs::path& path, const fs::path& root, CXIndex index,
                     arguments.emplace_back(output_flag);
                     arguments.push_back(std::move(value));
                 };
-                if (arg == option && i + 1 < count) {
-                    append(cx_text(clang_CompileCommand_getArg(command, ++i)));
+                if (arg == option && i + 1 < command_arguments.size()) {
+                    append(command_arguments[++i]);
                     return true;
                 }
                 if (arg.starts_with(option) && arg.size() > option.size()) {
@@ -487,6 +547,12 @@ void parse_ast(const fs::path& path, const fs::path& root, CXIndex index,
                 take_value("-D", "/D", false) || take_value("-D", "-D", false) ||
                 take_value("-U", "/U", false) || take_value("-U", "-U", false) ||
                 take_value("-include", "/FI", true) ||
+                take_value("-include", "-include", true) ||
+                take_value("-iquote", "-iquote", true) ||
+                take_value("-target", "--target=", false) ||
+                take_value("-target", "-target=", false) ||
+                take_value("-target", "-target", false) ||
+                take_value("-isysroot", "-isysroot", true) ||
                 take_value("-isystem", "-isystem", true)) {
                 continue;
             }
@@ -498,9 +564,39 @@ void parse_ast(const fs::path& path, const fs::path& root, CXIndex index,
                 } else {
                     arguments.push_back(arg);
                 }
+            } else if (arg == "/EHsc" || arg == "/EHs" || arg == "/EHa") {
+                arguments.emplace_back("-fexceptions");
+            } else if (arg == "--" || arg == "--driver-mode=g++" ||
+                       arg == "--driver-mode=cl" ||
+                       arg == "-c" || arg == "/c" || arg == "-TP" ||
+                       arg == "/TP" || arg == "/nologo" || arg == "/Zi" ||
+                       arg == "/Z7" || arg.starts_with("/RTC") ||
+                       arg.starts_with("/Ob") || arg.starts_with("-W") ||
+                       arg == "-MMD" || arg == "-MD" || arg == "-MDd" ||
+                       arg == "-MTd" || arg == "-MP") {
+                continue;
+            } else if ((arg == "-o" || arg == "-MF" || arg == "-MT" ||
+                        arg == "-MQ") && i + 1 < command_arguments.size()) {
+                ++i;
+            } else if (arg.starts_with("/Fo") || arg.starts_with("/Fd") ||
+                       arg.starts_with("-O") || arg.starts_with("/O")) {
+                continue;
+            } else if (arg == path_string ||
+                       (!arg.starts_with('-') && !arg.starts_with('/') &&
+                        from_utf8(arg).filename() == path.filename())) {
+                continue;
+            } else if (arg.starts_with("--target=") ||
+                       arg == "-fms-extensions" || arg == "-fno-exceptions" ||
+                       arg == "-fexceptions" || arg == "-fno-rtti" ||
+                       arg == "-frtti" || arg == "-fshort-wchar") {
+                arguments.push_back(arg);
+            } else {
+                file.build_context_complete = false;
+                file.ignored_compile_arguments.push_back(original);
             }
         }
     }
+    file.effective_compile_arguments = arguments;
     std::vector<const char*> raw_arguments;
     raw_arguments.reserve(arguments.size());
     for (const auto& argument : arguments) raw_arguments.push_back(argument.c_str());
@@ -559,6 +655,19 @@ std::expected<SourceFile, std::string> read_source(
 }
 
 } // namespace
+
+bool scan_parse_clean(const ProjectScan& scan) {
+    return std::ranges::all_of(scan.files, [](const SourceFile& file) {
+        return file.parsed && file.error_diagnostic_count == 0;
+    });
+}
+
+bool scan_coverage_complete(const ProjectScan& scan) {
+    return scan_parse_clean(scan) && scan.skipped_large_files.empty() &&
+        std::ranges::all_of(scan.files, [](const SourceFile& file) {
+            return file.build_context_complete;
+        });
+}
 
 std::expected<ProjectScan, std::string> scan_project(
     const fs::path& root_path,

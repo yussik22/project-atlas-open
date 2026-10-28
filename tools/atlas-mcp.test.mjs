@@ -337,7 +337,8 @@ test('MCP controls the live native GUI and embedded debugger without UI clicks',
       assert.equal(recorded.result.isError, undefined);
       const afterRecord = await waitFor(data => !data.recording &&
         data.trace_path.includes('.project-atlas') && data.active_tab === 4);
-      assert.equal(afterRecord.total_steps, 10);
+      // The eleventh event is the terminal capture.complete record.
+      assert.equal(afterRecord.total_steps, 11);
       const umlOverview = await call('atlas_ui_uml_overview', { pid: child.pid });
       assert.equal(umlOverview.result.isError, undefined);
       assert.equal(umlOverview.data.uml_overview, true);

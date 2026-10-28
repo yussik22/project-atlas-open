@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ProjectAtlas VERSION 0.11.0 LANGUAGES CXX)
+project(ProjectAtlas VERSION 0.11.1 LANGUAGES CXX)
 
 set(LIBCLANG_ROOT "" CACHE PATH "Root of an LLVM installation with libclang")
 if(NOT LIBCLANG_ROOT)
@@ -106,9 +106,13 @@ if(WIN32)
 
     add_executable(project_atlas_debug_demo examples/debugger_demo.cpp)
     target_compile_features(project_atlas_debug_demo PRIVATE cxx_std_23)
+    add_executable(project_atlas_debug_threads_demo examples/debugger_threads_demo.cpp)
+    target_compile_features(project_atlas_debug_threads_demo PRIVATE cxx_std_23)
     if(MSVC)
         target_compile_options(project_atlas_debug_demo PRIVATE /Od /Zi)
         target_link_options(project_atlas_debug_demo PRIVATE /DEBUG)
+        target_compile_options(project_atlas_debug_threads_demo PRIVATE /Od /Zi)
+        target_link_options(project_atlas_debug_threads_demo PRIVATE /DEBUG)
     endif()
 
     add_executable(project_atlas_gui WIN32 src/gui.cpp)
@@ -130,6 +134,8 @@ if(BUILD_TESTING)
             ATLAS_AUTO_DEMO_PATH="$<TARGET_FILE:project_atlas_auto_demo>"
             ATLAS_DEBUG_DEMO_PATH="$<TARGET_FILE:project_atlas_debug_demo>"
             ATLAS_DEBUG_DEMO_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/examples/debugger_demo.cpp"
+            ATLAS_DEBUG_THREADS_DEMO_PATH="$<TARGET_FILE:project_atlas_debug_threads_demo>"
+            ATLAS_DEBUG_THREADS_DEMO_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/examples/debugger_threads_demo.cpp"
             ATLAS_CLI_PATH="$<TARGET_FILE:project_atlas>")
         add_test(NAME project_atlas_gui_smoke
             COMMAND project_atlas_gui --smoke

@@ -54,6 +54,11 @@ std::string interaction_node_kind_name(InteractionNodeKind kind) {
 InteractionGraph build_interaction_graph(
     const ProjectScan& scan, const std::optional<RuntimeSnapshot>& snapshot) {
     InteractionGraph graph;
+    graph.parse_clean = scan_parse_clean(scan);
+    graph.coverage_complete = scan_coverage_complete(scan);
+    graph.skipped_large_count = scan.skipped_large_files.size();
+    graph.build_context_incomplete_files = std::ranges::count_if(
+        scan.files, [](const SourceFile& file) { return !file.build_context_complete; });
     std::map<fs::path, std::size_t> files;
     for (std::size_t i = 0; i < scan.files.size(); ++i) {
         const auto& path = scan.files[i].relative_path;
@@ -185,6 +190,10 @@ std::string agent_interactions_json(const InteractionGraph& graph, std::size_t m
         << ",\"edge_count\":" << graph.edges.size()
         << ",\"returned_edges\":" << returned
         << ",\"truncated\":" << (returned < graph.edges.size() ? "true" : "false")
+        << ",\"parse_clean\":" << (graph.parse_clean ? "true" : "false")
+        << ",\"coverage_complete\":" << (graph.coverage_complete ? "true" : "false")
+        << ",\"skipped_large_count\":" << graph.skipped_large_count
+        << ",\"build_context_incomplete_files\":" << graph.build_context_incomplete_files
         << ",\"unmapped_calls\":" << graph.unmapped_calls
         << ",\"unresolved_calls\":" << graph.unresolved_calls
         << ",\"dynamic_call_sites\":" << graph.dynamic_call_sites

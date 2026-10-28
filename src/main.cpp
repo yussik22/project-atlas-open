@@ -49,7 +49,7 @@ void usage() {
               << "  project_atlas agent ui debug-launch <executable.exe> [pid]\n"
               << "  project_atlas agent ui debug-break <source-file> <line> [pid]\n"
               << "  project_atlas agent ui debug-continue|debug-step|debug-stop [pid]\n"
-              << "  project_atlas capture <instrumented-exe> <new-output.trace>\n";
+              << "  project_atlas capture <instrumented-exe> <new-output.trace> [--test <id>]\n";
 }
 
 std::optional<std::uint64_t> unsigned_number(std::wstring_view value) {
@@ -185,8 +185,10 @@ int agent_ui(int argc) {
 
 int main(int argc, char** argv) {
     try {
-        if (argc == 4 && std::string_view(argv[1]) == "capture") {
-            auto result = atlas::capture_runtime(argv[2], argv[3]);
+        if ((argc == 4 || (argc == 6 && std::string_view(argv[4]) == "--test")) &&
+            std::string_view(argv[1]) == "capture") {
+            const std::string_view test_id = argc == 6 ? argv[5] : "";
+            auto result = atlas::capture_runtime(argv[2], argv[3], {}, test_id);
             if (!result) {
                 std::cerr << "capture: " << result.error() << '\n';
                 return 1;

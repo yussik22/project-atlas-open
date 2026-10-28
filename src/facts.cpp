@@ -45,6 +45,15 @@ std::string_view kind_name(DifferenceKind kind) {
 } // namespace
 
 std::expected<Facts, std::string> read_facts(const fs::path& path) {
+    constexpr std::uintmax_t max_facts_bytes = 16 * 1024 * 1024;
+    constexpr std::size_t max_fact_line_bytes = 64 * 1024;
+    constexpr std::size_t max_facts = 100'000;
+    std::error_code size_error;
+    const auto file_bytes = fs::file_size(path, size_error);
+    if (size_error)
+        return std::unexpected("cannot inspect facts file: " + path.string());
+    if (file_bytes > max_facts_bytes)
+        return std::unexpected("facts file exceeds byte limit: " + path.string());
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         return std::unexpected("cannot open facts file: " + path.string());
@@ -52,8 +61,31 @@ std::expected<Facts, std::string> read_facts(const fs::path& path) {
     Facts facts;
     std::string line;
     std::size_t line_number = 0;
-    while (std::getline(input, line)) {
+    std::size_t bytes_read = 0;
+    const auto next_line = [&]() -> std::expected<bool, std::string> {
+        line.clear();
+        for (;;) {
+            const int next = input.get();
+            if (next == std::char_traits<char>::eof()) {
+                if (input.bad()) return std::unexpected("error reading facts file: " + path.string());
+                return !line.empty();
+            }
+            if (++bytes_read > max_facts_bytes)
+                return std::unexpected("facts file exceeds byte limit: " + path.string());
+            if (next == '\n') return true;
+            if (line.size() >= max_fact_line_bytes)
+                return std::unexpected(path.string() + ":" +
+                    std::to_string(line_number + 1) + ": fact line exceeds limit");
+            line.push_back(static_cast<char>(next));
+        }
+    };
+    for (;;) {
+        const auto has_line = next_line();
+        if (!has_line) return std::unexpected(has_line.error());
+        if (!*has_line) break;
         ++line_number;
+        if (facts.size() >= max_facts)
+            return std::unexpected("facts entry limit exceeded: " + path.string());
         const auto text = trim(line);
         if (text.empty() || text.front() == '#') continue;
         const auto equals = text.find('=');
@@ -71,9 +103,6 @@ std::expected<Facts, std::string> read_facts(const fs::path& path) {
             return std::unexpected(path.string() + ":" + std::to_string(line_number) +
                                    ": duplicate fact key: " + std::string(key));
         }
-    }
-    if (input.bad()) {
-        return std::unexpected("error reading facts file: " + path.string());
     }
     return facts;
 }

@@ -10,9 +10,12 @@
 #include "atlas/interaction_presentation.hpp"
 #include "atlas/context.hpp"
 #include "atlas/agent_tools.hpp"
+#include "atlas/ui_control.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -21,6 +24,14 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <tlhelp32.h>
+#endif
 
 namespace {
 
@@ -220,6 +231,21 @@ void scan_and_report_test(const std::filesystem::path& workspace) {
           "unowned output directory was overwritten");
     check(read_text(unowned / "keep.txt") == "not generated\n",
           "unowned file was modified");
+    std::filesystem::remove(reports / "index.md");
+    std::filesystem::create_hard_link(unowned / "keep.txt", reports / "index.md");
+    check(atlas::write_project_report(*scan, reports).has_value() &&
+              read_text(unowned / "keep.txt") == "not generated\n",
+          "report replacement modified an external hard-link target");
+    std::filesystem::remove(reports / "index.md");
+    std::error_code symlink_error;
+    std::filesystem::create_symlink(unowned / "keep.txt", reports / "index.md",
+                                    symlink_error);
+    if (!symlink_error) {
+        check(!atlas::write_project_report(*scan, reports).has_value() &&
+                  read_text(unowned / "keep.txt") == "not generated\n",
+              "report followed a linked output path");
+        std::filesystem::remove(reports / "index.md");
+    }
 }
 
 void orphan_card_archive_test(const std::filesystem::path& workspace) {
@@ -540,6 +566,99 @@ void cross_file_calls_test(const std::filesystem::path& workspace) {
           "compact context served a snippet from changed source");
 }
 
+void compile_context_and_coverage_test(const std::filesystem::path& workspace) {
+    const auto root = workspace / "compile-context";
+    write_text(root / "forced.hpp", "#define ATLAS_FORCED 1\n");
+    write_text(root / "main.cpp",
+               "#if !defined(ATLAS_FORCED) || RESPONSE_VALUE != 7\n"
+               "#error compilation context was lost\n"
+               "#endif\n"
+               "struct FromConfiguredBuild {};\n");
+    write_text(root / "flags.rsp", "-DRESPONSE_VALUE=7 -include forced.hpp");
+    const auto directory = root.generic_string();
+    const auto source = (root / "main.cpp").generic_string();
+    write_text(root / "compile_commands.json",
+               "[{\"directory\":\"" + directory +
+                   "\",\"file\":\"" + source +
+                   "\",\"arguments\":[\"clang++\",\"@flags.rsp\",\"-c\",\"" +
+                   source + "\"]}]");
+    const auto complete = atlas::scan_project(root, root);
+    check(complete && complete->files.size() == 2,
+          "response-file build fixture scan failed");
+    const auto configured = std::ranges::find_if(complete->files,
+        [](const atlas::SourceFile& file) { return file.relative_path == "main.cpp"; });
+    check(configured != complete->files.end() && configured->parsed &&
+              configured->error_diagnostic_count == 0 &&
+              configured->build_context_complete &&
+              configured->compile_command_count == 1 &&
+              std::ranges::find(configured->effective_compile_arguments,
+                                "-D") != configured->effective_compile_arguments.end() &&
+              std::ranges::find(configured->effective_compile_arguments,
+                                "-include") != configured->effective_compile_arguments.end(),
+          "response file, forced include, or build-context evidence was lost");
+
+    write_text(root / "compile_commands.json",
+               "[{\"directory\":\"" + directory +
+                   "\",\"file\":\"" + source +
+                   "\",\"arguments\":[\"clang-cl.exe\",\"/nologo\",\"-TP\","
+                   "\"/EHsc\",\"/Zi\",\"/RTC1\",\"-clang:-std=c++23\","
+                   "\"-MDd\",\"@flags.rsp\",\"-c\",\"" + source + "\"]}]");
+    const auto clang_cl = atlas::scan_project(root, root);
+    check(clang_cl.has_value(), "clang-cl build fixture scan failed");
+    const auto clang_cl_file = std::ranges::find_if(clang_cl->files,
+        [](const atlas::SourceFile& file) { return file.relative_path == "main.cpp"; });
+    check(clang_cl_file != clang_cl->files.end() &&
+              clang_cl_file->parsed && clang_cl_file->error_diagnostic_count == 0 &&
+              clang_cl_file->build_context_complete &&
+              std::ranges::find(clang_cl_file->effective_compile_arguments,
+                                "-fexceptions") != clang_cl_file->effective_compile_arguments.end(),
+          "ordinary clang-cl driver flags were mistaken for lost build context");
+
+    write_text(root / "compile_commands.json",
+               "[{\"directory\":\"" + directory +
+                   "\",\"file\":\"" + source +
+                   "\",\"arguments\":[\"clang++\",\"@flags.rsp\",\"-funroll-loops\",\"" +
+                   source + "\"]}]");
+    const auto ignored = atlas::scan_project(root, root);
+    check(ignored && !atlas::scan_coverage_complete(*ignored) &&
+              ignored->files.back().ignored_compile_arguments.size() == 1 &&
+              ignored->files.back().ignored_compile_arguments.front() == "-funroll-loops",
+          "ignored build flag was silently reported as complete coverage");
+
+    const auto command = "{\"directory\":\"" + directory +
+        "\",\"file\":\"" + source +
+        "\",\"arguments\":[\"clang++\",\"@flags.rsp\",\"" + source + "\"]}";
+    write_text(root / "compile_commands.json", "[" + command + "," + command + "]");
+    const auto ambiguous = atlas::scan_project(root, root);
+    check(ambiguous && ambiguous->files.back().compile_command_count == 2 &&
+              !ambiguous->files.back().build_context_complete,
+          "multiple compile configurations were silently collapsed into one");
+
+    atlas::ProjectScan synthetic;
+    synthetic.root = workspace;
+    atlas::SourceFile file;
+    file.relative_path = "synthetic.cpp";
+    file.parsed = true;
+    file.build_context_complete = true;
+    for (int i = 0; i < 5; ++i) {
+        atlas::Symbol symbol;
+        symbol.name = "Target" + std::to_string(i);
+        file.symbols.push_back(std::move(symbol));
+    }
+    synthetic.files.push_back(std::move(file));
+    const auto context = atlas::agent_context_json(synthetic, "Target", 1000);
+    check(context.find("\"truncated\":true") != std::string::npos &&
+              context.find("\"symbol_matches\":5") != std::string::npos &&
+              context.find("\"returned_symbols\":2") != std::string::npos,
+          "nested context truncation was not disclosed");
+    synthetic.skipped_large_files.push_back("oversized.cpp");
+    const auto partial = atlas::agent_context_json(synthetic, "Target", 1000);
+    check(partial.find("\"parse_clean\":true") != std::string::npos &&
+              partial.find("\"coverage_complete\":false") != std::string::npos &&
+              partial.find("\"clean\":false") != std::string::npos,
+          "skipped source was presented as complete coverage");
+}
+
 void portable_lambda_paths_test(const std::filesystem::path& workspace) {
     const auto root = workspace / "portable-lambda";
     write_text(root / "lambda.cpp",
@@ -667,6 +786,14 @@ void expected_actual_test(const std::filesystem::path& workspace) {
     write_text(workspace / "duplicate.facts", "same=1\nsame=2\n");
     check(!atlas::read_facts(workspace / "duplicate.facts").has_value(),
           "duplicate fact silently accepted");
+    const auto oversized_facts = workspace / "oversized.facts";
+    write_text(oversized_facts, "a=1\n");
+    std::filesystem::resize_file(oversized_facts, 16 * 1024 * 1024 + 1);
+    check(!atlas::read_facts(oversized_facts).has_value(),
+          "facts byte limit did not reject an oversized file");
+    write_text(workspace / "long-line.facts", "a=" + std::string(70 * 1024, 'x') + "\n");
+    check(!atlas::read_facts(workspace / "long-line.facts").has_value(),
+          "facts line limit did not reject a giant value");
     check(atlas::compare({{"state", "Ready"}}, {{"state", "Ready"}}).all_match(),
           "identical facts reported different");
 }
@@ -746,6 +873,41 @@ void memory_trace_test(const std::filesystem::path& workspace) {
     try { invalid_writer.record("owner", "memory.buffer", "line\nbreak"); }
     catch (const std::invalid_argument&) { rejected = true; }
     check(rejected, "trace writer accepted a multiline value");
+
+    const auto sourced_path = workspace / "sourced.trace";
+    {
+        std::ofstream output(sourced_path, std::ios::binary);
+        atlas::TraceWriter writer(output, atlas::TraceFormat::v2);
+        writer.record("site.create", "site.1", "allocation", "src/example.cpp", 42);
+        writer.record("obj.create", "heap.1", "8 B");
+        writer.record("link.add", "site.1", "allocates:heap.1");
+    }
+    const auto sourced = atlas::read_trace(sourced_path);
+    check(sourced && sourced->size() == 3 &&
+              (*sourced)[0].source_file == "src/example.cpp" &&
+              (*sourced)[0].source_line == 42 &&
+              (*sourced)[1].source_file.empty() && (*sourced)[1].source_line == 0,
+          "v2 trace lost structured source location");
+    const auto sourced_snapshot = atlas::replay_runtime(*sourced, 3);
+    check(sourced_snapshot && sourced_snapshot->nodes.size() == 2 &&
+              atlas::agent_runtime_json(*sourced_snapshot).find(
+                  "\"source_file\":\"src/example.cpp\",\"source_line\":42") !=
+                  std::string::npos,
+          "runtime JSON lost structured source location");
+    write_text(workspace / "bad_source.trace",
+               "# atlas-trace-v2\n1\tsite.create\tsite.1\tallocation\t\t42\n");
+    check(!atlas::read_trace(workspace / "bad_source.trace").has_value(),
+          "v2 trace accepted a line number without a source file");
+    write_text(workspace / "bad_source_columns.trace",
+               "# atlas-trace-v2\n1\tsite.create\tsite.1\tallocation\tfile.cpp\n");
+    check(!atlas::read_trace(workspace / "bad_source_columns.trace").has_value(),
+          "v2 trace accepted a missing source column");
+    check(!atlas::read_trace(expected_path, {16, 100, 100}).has_value(),
+          "trace byte limit did not reject a file before parsing");
+    check(!atlas::read_trace(expected_path, {1024, 2, 100}).has_value(),
+          "trace event limit did not reject an extra event");
+    check(!atlas::read_trace(expected_path, {1024, 100, 20}).has_value(),
+          "trace line limit did not reject a long event");
 }
 
 void runtime_graph_test(const std::filesystem::path& workspace) {
@@ -816,6 +978,42 @@ void runtime_graph_test(const std::filesystem::path& workspace) {
 }
 
 #ifdef _WIN32
+void stalled_ui_client_test() {
+    const DWORD pid = GetCurrentProcessId();
+    std::atomic<bool> handled{false};
+    std::jthread server([&](std::stop_token stop) {
+        atlas::serve_ui_commands(stop, pid, [&](const atlas::UiCommand&) {
+            handled.store(true);
+            atlas::UiReply reply;
+            reply.ok = 1;
+            return reply;
+        });
+    });
+    const auto name = L"\\\\.\\pipe\\ProjectAtlas.UI." + std::to_wstring(pid);
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline) {
+        pipe = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                           nullptr, OPEN_EXISTING, 0, nullptr);
+        if (pipe != INVALID_HANDLE_VALUE) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(pipe != INVALID_HANDLE_VALUE, "test could not connect to UI pipe");
+    atlas::UiCommand command;
+    DWORD written = 0;
+    check(WriteFile(pipe, &command, sizeof(command), &written, nullptr) &&
+              written == sizeof(command), "test could not send UI command");
+    while (!handled.load() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    check(handled.load(), "UI server did not process stalled client request");
+    const auto start = std::chrono::steady_clock::now();
+    server.request_stop();
+    server.join();
+    CloseHandle(pipe);
+    check(std::chrono::steady_clock::now() - start < std::chrono::seconds(3),
+          "UI server did not stop with a client holding unread reply bytes");
+}
+
 void embedded_debugger_test() {
     atlas::NativeDebugger debugger;
     std::string error;
@@ -847,9 +1045,85 @@ void embedded_debugger_test() {
     wait_for("\"reason\":\"exit code 0\"");
 }
 
+void multithread_breakpoint_test() {
+    atlas::NativeDebugger debugger;
+    std::string error;
+    auto wait_for = [&](std::string_view stage, auto predicate) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto snapshot = debugger.snapshot_json();
+            if (predicate(snapshot)) return snapshot;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        const auto state = debugger.snapshot_json();
+        std::ostringstream detail;
+        const auto pid_at = state.find("\"pid\":");
+        if (pid_at != std::string::npos) {
+            const auto pid = static_cast<DWORD>(std::stoul(state.substr(pid_at + 6)));
+            HANDLE threads = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (threads != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 entry{};
+                entry.dwSize = sizeof(entry);
+                if (Thread32First(threads, &entry)) do {
+                    if (entry.th32OwnerProcessID != pid) continue;
+                    HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT,
+                                               FALSE, entry.th32ThreadID);
+                    if (!thread) continue;
+                    const auto previous = SuspendThread(thread);
+                    CONTEXT context{};
+                    context.ContextFlags = CONTEXT_CONTROL;
+                    const bool got = GetThreadContext(thread, &context) != FALSE;
+                    detail << " thread=" << entry.th32ThreadID << " suspend=" << previous
+                           << " rip=" << (got ? context.Rip : 0);
+                    if (previous != static_cast<DWORD>(-1)) ResumeThread(thread);
+                    CloseHandle(thread);
+                } while (Thread32Next(threads, &entry));
+                CloseHandle(threads);
+            }
+        }
+        throw std::runtime_error("multi-thread debugger timeout at " +
+                                 std::string(stage) + ": " + state + detail.str());
+    };
+    auto thread_id = [](const std::string& snapshot) {
+        const auto start = snapshot.find("\"thread_id\":");
+        if (start == std::string::npos) return std::string{};
+        const auto first = start + sizeof("\"thread_id\":") - 1;
+        return snapshot.substr(first, snapshot.find(',', first) - first);
+    };
+    check(debugger.launch(ATLAS_DEBUG_THREADS_DEMO_PATH, error),
+          "multi-thread debugger launch failed");
+    wait_for("entry", [](const std::string& state) {
+        return state.find("\"reason\":\"entry\"") != std::string::npos;
+    });
+    check(debugger.breakpoint(ATLAS_DEBUG_THREADS_DEMO_SOURCE, 6, error),
+          "multi-thread breakpoint request failed");
+    wait_for("breakpoint verification", [](const std::string& state) {
+        return state.find("\"verified\":true") != std::string::npos;
+    });
+    check(debugger.resume(false, error), "multi-thread debugger continue failed");
+    const auto first = wait_for("first breakpoint", [](const std::string& state) {
+        return state.find("\"reason\":\"breakpoint\"") != std::string::npos;
+    });
+    const auto first_id = thread_id(first);
+    check(!first_id.empty() && first_id != "0", "first breakpoint missed thread ID");
+    check(debugger.resume(false, error), "multi-thread breakpoint rearm failed");
+    wait_for("second breakpoint", [&](const std::string& state) {
+        return state.find("\"reason\":\"breakpoint\"") != std::string::npos &&
+               thread_id(state) != first_id;
+    });
+    check(debugger.resume(false, error), "second breakpoint resume failed");
+    wait_for("exit", [](const std::string& state) {
+        return state.find("\"reason\":\"exit code 0\"") != std::string::npos;
+    });
+}
+
 void automatic_capture_test(const std::filesystem::path& workspace) {
     const auto output = workspace / "auto-runtime-generated.trace";
+    const auto tagged_output = workspace / "auto-runtime-tagged.trace";
+    const auto invalid_output = workspace / "auto-runtime-invalid-test.trace";
     std::filesystem::remove(output);
+    std::filesystem::remove(tagged_output);
+    std::filesystem::remove(invalid_output);
     std::filesystem::remove(std::filesystem::path(output.string() + ".raw"));
     std::filesystem::remove(std::filesystem::path(output.string() + ".symbolized.tmp"));
     const auto result = atlas::capture_runtime(ATLAS_AUTO_DEMO_PATH, output);
@@ -857,6 +1131,16 @@ void automatic_capture_test(const std::filesystem::path& workspace) {
           "automatic capture failed");
     const auto trace = atlas::read_trace(output);
     check(trace && trace->size() >= 10, "automatic trace omitted allocations");
+    check(trace->back().operation == "capture.complete" &&
+              trace->back().resource == "capture",
+          "automatic capture did not finish with a terminal record");
+    const auto has_source = std::any_of(trace->begin(), trace->end(),
+        [](const atlas::TraceEvent& event) {
+            return event.operation == "site.create" &&
+                   !event.source_file.empty() && event.source_line > 0;
+        });
+    check(has_source && read_text(output).starts_with("# atlas-trace-v2\n"),
+          "automatic capture did not serialize PDB source locations");
     const auto active = atlas::replay_runtime(*trace, 6);
     check(active && active->links.size() == 2 && active->nodes.size() == 4,
           "automatic graph lost call sites or allocations");
@@ -865,6 +1149,57 @@ void automatic_capture_test(const std::filesystem::path& workspace) {
           "automatic graph retained released allocations");
     check(!atlas::capture_runtime(ATLAS_AUTO_DEMO_PATH, output).has_value(),
           "capture overwrote an existing trace");
+    const auto tagged = atlas::capture_runtime(
+        ATLAS_AUTO_DEMO_PATH, tagged_output, {}, "allocation_case");
+    check(tagged && tagged->exit_code == 0, "tagged automatic capture failed");
+    const auto tagged_trace = atlas::read_trace(tagged_output);
+    check(tagged_trace && !tagged_trace->empty() &&
+              tagged_trace->front().operation == "test.context" &&
+              tagged_trace->front().resource == "test" &&
+              tagged_trace->front().value == "allocation_case",
+          "test identity was not stored in the captured trace");
+    const auto tagged_snapshot = atlas::replay_runtime(*tagged_trace, tagged_trace->size());
+    check(tagged_snapshot && tagged_snapshot->test_id == "allocation_case" &&
+              atlas::agent_runtime_json(*tagged_snapshot).find(
+                  "\"test_id\":\"allocation_case\"") != std::string::npos,
+          "runtime replay or agent JSON lost test identity");
+    const atlas::Trace misplaced_context{
+        {1, "obj.create", "heap.1", "object"},
+        {2, "test.context", "test", "allocation_case"}};
+    check(!atlas::replay_runtime(misplaced_context, 2).has_value(),
+          "runtime replay accepted a late test context");
+    const atlas::Trace invalid_context{{1, "test.context", "test", "bad name"}};
+    check(!atlas::replay_runtime(invalid_context, 1).has_value(),
+          "runtime replay accepted an invalid test ID");
+    check(!atlas::capture_runtime(
+              ATLAS_AUTO_DEMO_PATH, invalid_output, {}, "bad test name").has_value() &&
+              !std::filesystem::exists(invalid_output),
+          "invalid test identity was accepted or created a trace");
+    const auto crashed_output = workspace / "auto-runtime-crashed.trace";
+    std::filesystem::remove(crashed_output);
+    _putenv_s("ATLAS_AUTO_DEMO_CRASH", "1");
+    const auto crashed = atlas::capture_runtime(ATLAS_AUTO_DEMO_PATH, crashed_output);
+    _putenv_s("ATLAS_AUTO_DEMO_CRASH", "");
+    check(!crashed.has_value() && !std::filesystem::exists(crashed_output),
+          "crashed target published a trace without a terminal record");
+    const auto concurrent_a = workspace / "auto-runtime-concurrent-a.trace";
+    const auto concurrent_b = workspace / "auto-runtime-concurrent-b.trace";
+    std::filesystem::remove(concurrent_a);
+    std::filesystem::remove(concurrent_b);
+    std::optional<std::expected<atlas::CaptureResult, std::string>> captured_a;
+    std::optional<std::expected<atlas::CaptureResult, std::string>> captured_b;
+    std::thread first([&] {
+        captured_a = atlas::capture_runtime(ATLAS_AUTO_DEMO_PATH, concurrent_a);
+    });
+    std::thread second([&] {
+        captured_b = atlas::capture_runtime(ATLAS_AUTO_DEMO_PATH, concurrent_b);
+    });
+    first.join();
+    second.join();
+    check(captured_a && captured_b && captured_a->has_value() &&
+              captured_b->has_value() && std::filesystem::exists(concurrent_a) &&
+              std::filesystem::exists(concurrent_b),
+          "simultaneous captures failed DbgHelp serialization");
     const auto no_recorder = atlas::capture_runtime(
         ATLAS_CLI_PATH, workspace / "no-recorder.trace");
     check(!no_recorder.has_value(), "uninstrumented executable claimed capture");
@@ -882,13 +1217,16 @@ int main() {
         wrapped_field_graph_test(workspace);
         dispatch_call_test(workspace);
         cross_file_calls_test(workspace);
+        compile_context_and_coverage_test(workspace);
         portable_lambda_paths_test(workspace);
         namespaces_and_diagnostics_test(workspace);
         expected_actual_test(workspace);
         memory_trace_test(workspace);
         runtime_graph_test(workspace);
 #ifdef _WIN32
+        stalled_ui_client_test();
         embedded_debugger_test();
+        multithread_breakpoint_test();
         automatic_capture_test(workspace);
 #endif
         std::cout << "Project Atlas tests passed\n";

@@ -6,10 +6,12 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <intrin.h>
+#include <io.h>
 #include <iterator>
 #include <malloc.h>
 #include <new>
@@ -41,7 +43,17 @@ std::uint64_t next_id = 1;
 std::uint64_t next_site_id = 1;
 std::size_t events = 0;
 bool saturated = false;
+bool write_failed = false;
 thread_local bool inside_recorder = false;
+
+void recordf(const char* format, ...) noexcept {
+    if (!output || write_failed) return;
+    va_list arguments;
+    va_start(arguments, format);
+    const int written = std::vfprintf(output, format, arguments);
+    va_end(arguments);
+    if (written < 0 || std::ferror(output)) write_failed = true;
+}
 
 struct ScopedLock {
     ScopedLock() { while (guard.test_and_set(std::memory_order_acquire)) YieldProcessor(); }
@@ -51,7 +63,16 @@ struct ScopedLock {
 void close_output() noexcept {
     ScopedLock lock;
     if (output) {
-        std::fclose(output);
+        if (!write_failed && std::fflush(output) == 0) {
+            const auto handle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(output)));
+            if (handle != INVALID_HANDLE_VALUE && FlushFileBuffers(handle))
+                recordf("%zu\tcapture.complete\tcapture\tok\n", ++events);
+            else write_failed = true;
+        } else write_failed = true;
+        if (std::fflush(output) != 0) write_failed = true;
+        const auto handle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(output)));
+        if (handle != INVALID_HANDLE_VALUE && !FlushFileBuffers(handle)) write_failed = true;
+        if (std::fclose(output) != 0) write_failed = true;
         output = nullptr;
     }
 }
@@ -65,7 +86,22 @@ void initialize() noexcept {
     if (length == 0 || length >= std::size(path)) return;
     if (_wfopen_s(&output, path, L"wb") != 0 || !output) return;
     std::setvbuf(output, nullptr, _IONBF, 0);
-    std::fputs("# atlas-trace-v1\n", output);
+    if (std::fputs("# atlas-trace-v1\n", output) == EOF) write_failed = true;
+    wchar_t test_id[128]{};
+    const DWORD test_length = GetEnvironmentVariableW(
+        L"ATLAS_TEST_ID", test_id, static_cast<DWORD>(std::size(test_id)));
+    if (test_length > 0 && test_length < std::size(test_id)) {
+        bool valid = true;
+        char ascii_id[128]{};
+        for (DWORD i = 0; i < test_length; ++i) {
+            const wchar_t ch = test_id[i];
+            valid &= (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') ||
+                     (ch >= L'0' && ch <= L'9') || ch == L'_' || ch == L'.' || ch == L'-';
+            ascii_id[i] = static_cast<char>(ch);
+        }
+        if (valid)
+            recordf("%zu\ttest.context\ttest\t%s\n", ++events, ascii_id);
+    }
     std::atexit(close_output);
 }
 
@@ -77,8 +113,8 @@ std::size_t slot_for(void* pointer) noexcept {
 }
 
 void record_limit() noexcept {
-    if (!output || saturated) return;
-    std::fprintf(output, "%zu\tcapture.truncated\tcapture\t10000\n", ++events);
+    if (!output || saturated || write_failed) return;
+    recordf("%zu\tcapture.truncated\tcapture\t10000\n", ++events);
     saturated = true;
 }
 
@@ -88,7 +124,7 @@ void record_create(void* pointer, std::size_t bytes, void* call_site) noexcept {
     {
         ScopedLock lock;
         initialize();
-        if (output && !saturated) {
+        if (output && !saturated && !write_failed) {
             Site* found_site = nullptr;
             Site* empty_site = nullptr;
             for (auto& site : sites) {
@@ -98,7 +134,7 @@ void record_create(void* pointer, std::size_t bytes, void* call_site) noexcept {
             const bool new_site = !found_site && empty_site;
             const std::size_t needed = (new_site ? 1 : 0) + 1 +
                                        (found_site || new_site ? 1 : 0);
-            if (events + needed >= max_events) {
+            if (events + needed + 1 >= max_events) {
                 record_limit();
                 inside_recorder = false;
                 return;
@@ -124,13 +160,13 @@ void record_create(void* pointer, std::size_t bytes, void* call_site) noexcept {
                         if (module == GetModuleHandleW(nullptr)) {
                             const auto offset = reinterpret_cast<std::uintptr_t>(call_site) -
                                                 reinterpret_cast<std::uintptr_t>(module);
-                            std::fprintf(output,
+                            recordf(
                                          "%zu\tsite.create\tsite.%llu\texe+0x%llx\n",
                                          ++events,
                                          static_cast<unsigned long long>(found_site->id),
                                          static_cast<unsigned long long>(offset));
                         } else {
-                            std::fprintf(output,
+                            recordf(
                                          "%zu\tsite.create\tsite.%llu\tmodule site %p\n",
                                          ++events,
                                          static_cast<unsigned long long>(found_site->id),
@@ -138,10 +174,10 @@ void record_create(void* pointer, std::size_t bytes, void* call_site) noexcept {
                         }
                     }
                     target = {pointer, next_id++, found_site ? found_site->id : 0, false};
-                    std::fprintf(output, "%zu\tobj.create\theap.%llu\theap allocation %zu B\n",
+                    recordf("%zu\tobj.create\theap.%llu\theap allocation %zu B\n",
                                  ++events, static_cast<unsigned long long>(target.id), bytes);
                     if (target.site_id)
-                        std::fprintf(output,
+                        recordf(
                                      "%zu\tlink.add\tsite.%llu\tallocates:heap.%llu\n",
                                      ++events,
                                      static_cast<unsigned long long>(target.site_id),
@@ -159,23 +195,23 @@ void record_destroy(void* pointer) noexcept {
     inside_recorder = true;
     {
         ScopedLock lock;
-        if (output && !saturated) {
+        if (output && !saturated && !write_failed) {
             const std::size_t start = slot_for(pointer);
             for (std::size_t probe = 0; probe < table_size; ++probe) {
                 auto& entry = entries[(start + probe) & (table_size - 1)];
                 if (!entry.pointer && !entry.tombstone) break;
                 if (entry.pointer == pointer) {
-                    if (events + (entry.site_id ? 2 : 1) >= max_events) {
+                    if (events + (entry.site_id ? 2 : 1) + 1 >= max_events) {
                         record_limit();
                         break;
                     }
                     if (entry.site_id)
-                        std::fprintf(output,
+                        recordf(
                                      "%zu\tlink.remove\tsite.%llu\tallocates:heap.%llu\n",
                                      ++events,
                                      static_cast<unsigned long long>(entry.site_id),
                                      static_cast<unsigned long long>(entry.id));
-                    std::fprintf(output, "%zu\tobj.destroy\theap.%llu\t-\n",
+                    recordf("%zu\tobj.destroy\theap.%llu\t-\n",
                                  ++events, static_cast<unsigned long long>(entry.id));
                     entry.pointer = nullptr;
                     entry.tombstone = true;

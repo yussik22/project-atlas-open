@@ -17,25 +17,38 @@ struct TraceEvent {
     std::string operation;
     std::string resource;
     std::string value;
+    std::string source_file;
+    std::size_t source_line = 0;
 
     bool operator==(const TraceEvent&) const = default;
 };
 
 using Trace = std::vector<TraceEvent>;
 
+struct TraceReadLimits {
+    std::size_t max_bytes = 64 * 1024 * 1024;
+    std::size_t max_events = 1'000'000;
+    std::size_t max_line_bytes = 64 * 1024;
+};
+
+enum class TraceFormat { v1, v2 };
+
 // Opt-in test/debug writer. The .trace format is tab-separated and versioned.
 class TraceWriter {
 public:
-    explicit TraceWriter(std::ostream& output);
+    explicit TraceWriter(std::ostream& output, TraceFormat format = TraceFormat::v1);
     void record(std::string_view operation, std::string_view resource,
-                std::string_view value);
+                std::string_view value, std::string_view source_file = {},
+                std::size_t source_line = 0);
 
 private:
     std::ostream& output_;
+    TraceFormat format_;
     std::size_t next_step_ = 1;
 };
 
-std::expected<Trace, std::string> read_trace(const std::filesystem::path& path);
+std::expected<Trace, std::string> read_trace(
+    const std::filesystem::path& path, TraceReadLimits limits = {});
 
 struct TraceDifference {
     std::size_t step = 0;

@@ -5,4 +5,5 @@
 /.vs/
 *.user
 /node_modules/
+/atlas-test-workspace/
 /.codex/config.toml

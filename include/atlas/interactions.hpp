@@ -42,6 +42,10 @@ struct InteractionGraph {
     std::size_t indirect_call_sites = 0;
     std::optional<std::size_t> runtime_step;
     bool capture_truncated = false;
+    bool parse_clean = false;
+    bool coverage_complete = false;
+    std::size_t skipped_large_count = 0;
+    std::size_t build_context_incomplete_files = 0;
 };
 
 // Combines evidence without inventing a static-to-runtime identity. Runtime

@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <exception>
 #include <fstream>
@@ -56,6 +57,7 @@ constexpr int id_uml_prev = 136, id_uml_next = 137, id_diagram = 138;
 constexpr int id_uml_all = 139;
 constexpr int id_interaction_list = 140;
 constexpr int id_interaction_filter = 141;
+constexpr int id_runtime_test = 142;
 
 std::wstring wide(std::string_view value) {
     if (value.empty()) return {};
@@ -136,6 +138,12 @@ struct TreeItem {
     std::optional<std::size_t> symbol;
 };
 
+struct RuntimeSourceHit {
+    RECT box{};
+    std::wstring source_file;
+    std::size_t source_line = 0;
+};
+
 struct ScanResult {
     std::expected<atlas::ProjectScan, std::string> value;
 };
@@ -188,6 +196,7 @@ public:
     void diagram_clicked();
     LRESULT canvas_input(HWND canvas, UINT message, WPARAM wparam, LPARAM lparam);
     void draw_runtime(const DRAWITEMSTRUCT& item);
+    void runtime_clicked(POINT point);
     void set_runtime_step(std::size_t step);
     void refresh_interactions();
     void show_interaction_detail(std::size_t edge_index);
@@ -224,6 +233,7 @@ private:
     HWND results_ = nullptr, status_ = nullptr;
     HWND runtime_path_ = nullptr, runtime_browse_ = nullptr, runtime_load_ = nullptr;
     HWND runtime_exe_ = nullptr, runtime_exe_browse_ = nullptr, runtime_record_ = nullptr;
+    HWND runtime_test_ = nullptr;
     HWND runtime_prev_ = nullptr, runtime_next_ = nullptr, runtime_timeline_ = nullptr;
     HWND runtime_step_label_ = nullptr, runtime_canvas_ = nullptr;
     HWND debug_exe_ = nullptr, debug_browse_ = nullptr, debug_launch_ = nullptr;
@@ -266,6 +276,7 @@ private:
     std::optional<fs::path> smoke_runtime_;
     std::optional<atlas::Trace> runtime_trace_;
     std::optional<atlas::RuntimeSnapshot> runtime_snapshot_;
+    std::vector<RuntimeSourceHit> runtime_hits_;
     atlas::NativeDebugger debugger_;
     std::wstring debug_rendered_;
     std::size_t runtime_step_ = 0;
@@ -343,6 +354,8 @@ void App::create_controls() {
                                   id_runtime_exe_browse);
     runtime_record_ = control(window_, L"BUTTON", L"Record run", BS_PUSHBUTTON,
                               id_runtime_record);
+    runtime_test_ = control(window_, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
+                            id_runtime_test, WS_EX_CLIENTEDGE);
     runtime_path_ = control(window_, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
                             id_runtime_path, WS_EX_CLIENTEDGE);
     runtime_browse_ = control(window_, L"BUTTON", L"Browse…", BS_PUSHBUTTON, id_runtime_browse);
@@ -353,8 +366,10 @@ void App::create_controls() {
                                 id_runtime_timeline);
     runtime_step_label_ = control(window_, L"STATIC", L"Record a run or load a runtime .trace.",
                                   SS_LEFT, 0);
-    runtime_canvas_ = control(window_, L"STATIC", L"", SS_OWNERDRAW | WS_BORDER,
+    runtime_canvas_ = control(window_, L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY | WS_BORDER,
                               id_runtime_canvas);
+    SetWindowSubclass(runtime_canvas_, uml_canvas_proc, 1,
+                      reinterpret_cast<DWORD_PTR>(this));
     debug_exe_ = control(window_, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL,
                          id_debug_exe, WS_EX_CLIENTEDGE);
     debug_browse_ = control(window_, L"BUTTON", L"Browse…", BS_PUSHBUTTON, id_debug_browse);
@@ -390,7 +405,8 @@ void App::create_controls() {
                    detail_, diagram_, uml_overview_button_, uml_focus_button_,
                    uml_prev_, uml_next_, uml_all_, expected_, actual_, browse_expected_,
                    browse_actual_, compare_, results_, runtime_exe_,
-                   runtime_exe_browse_, runtime_record_, runtime_path_, runtime_browse_,
+                   runtime_exe_browse_, runtime_record_, runtime_test_,
+                   runtime_path_, runtime_browse_,
                    runtime_load_, runtime_prev_, runtime_next_, runtime_timeline_,
                    runtime_step_label_, runtime_canvas_, debug_exe_, debug_browse_,
                    debug_launch_, debug_file_, debug_file_browse_, debug_line_,
@@ -406,6 +422,8 @@ void App::create_controls() {
                  reinterpret_cast<LPARAM>(L"Runtime .trace file"));
     SendMessageW(runtime_exe_, EM_SETCUEBANNER, TRUE,
                  reinterpret_cast<LPARAM>(L"Instrumented C++ executable (.exe)"));
+    SendMessageW(runtime_test_, EM_SETCUEBANNER, TRUE,
+                 reinterpret_cast<LPARAM>(L"Optional test ID (letters, digits, _ . -)"));
     SendMessageW(debug_exe_, EM_SETCUEBANNER, TRUE,
                  reinterpret_cast<LPARAM>(L"Debug-build executable (.exe)"));
     SendMessageW(debug_file_, EM_SETCUEBANNER, TRUE,
@@ -492,13 +510,14 @@ void App::layout() {
     MoveWindow(runtime_path_, right_x + 12, body_y + 38, right_w - 238, row, TRUE);
     MoveWindow(runtime_browse_, width - 225, body_y + 38, 95, row, TRUE);
     MoveWindow(runtime_load_, width - 122, body_y + 38, 98, row, TRUE);
-    MoveWindow(runtime_prev_, right_x + 12, body_y + 78, 86, row, TRUE);
-    MoveWindow(runtime_next_, right_x + 106, body_y + 78, 70, row, TRUE);
-    MoveWindow(runtime_timeline_, right_x + 188, body_y + 76,
+    MoveWindow(runtime_test_, right_x + 12, body_y + 76, right_w - 24, row, TRUE);
+    MoveWindow(runtime_prev_, right_x + 12, body_y + 116, 86, row, TRUE);
+    MoveWindow(runtime_next_, right_x + 106, body_y + 116, 70, row, TRUE);
+    MoveWindow(runtime_timeline_, right_x + 188, body_y + 114,
                std::max(100, right_w - 200), 35, TRUE);
-    MoveWindow(runtime_step_label_, right_x + 12, body_y + 116, right_w - 24, 22, TRUE);
-    MoveWindow(runtime_canvas_, right_x + 12, body_y + 144, right_w - 24,
-               std::max(50, body_h - 144), TRUE);
+    MoveWindow(runtime_step_label_, right_x + 12, body_y + 154, right_w - 24, 22, TRUE);
+    MoveWindow(runtime_canvas_, right_x + 12, body_y + 182, right_w - 24,
+               std::max(50, body_h - 182), TRUE);
     MoveWindow(debug_exe_, right_x + 12, body_y, right_w - 238, row, TRUE);
     MoveWindow(debug_browse_, width - 225, body_y, 95, row, TRUE);
     MoveWindow(debug_launch_, width - 122, body_y, 98, row, TRUE);
@@ -718,10 +737,11 @@ void App::scan_finished(ScanResult* raw) {
                  TabCtrl_GetCurSel(tabs_) != 4) && smoke_exit_code == 0) {
                 smoke_exit_code = 8;
             }
-            RECT tab_bounds{}, canvas_bounds{}, load_bounds{};
+            RECT tab_bounds{}, canvas_bounds{}, load_bounds{}, test_bounds{};
             GetWindowRect(tabs_, &tab_bounds);
             GetWindowRect(runtime_canvas_, &canvas_bounds);
             GetWindowRect(runtime_load_, &load_bounds);
+            GetWindowRect(runtime_test_, &test_bounds);
             const bool controls_in_page =
                 canvas_bounds.left >= tab_bounds.left &&
                 canvas_bounds.right <= tab_bounds.right &&
@@ -730,13 +750,42 @@ void App::scan_finished(ScanResult* raw) {
                 load_bounds.left >= tab_bounds.left &&
                 load_bounds.right <= tab_bounds.right &&
                 load_bounds.top > tab_bounds.top &&
-                load_bounds.bottom <= tab_bounds.bottom;
+                load_bounds.bottom <= tab_bounds.bottom &&
+                test_bounds.left >= tab_bounds.left &&
+                test_bounds.right <= tab_bounds.right &&
+                test_bounds.top > tab_bounds.top &&
+                test_bounds.bottom <= tab_bounds.bottom;
             if ((!controls_in_page ||
                  !(GetWindowLongPtrW(runtime_canvas_, GWL_STYLE) & WS_VISIBLE) ||
                  !(GetWindowLongPtrW(runtime_load_, GWL_STYLE) & WS_VISIBLE) ||
                  !(GetWindowLongPtrW(runtime_record_, GWL_STYLE) & WS_VISIBLE) ||
+                 !(GetWindowLongPtrW(runtime_test_, GWL_STYLE) & WS_VISIBLE) ||
                  GetWindow(tabs_, GW_HWNDNEXT) != nullptr) && smoke_exit_code == 0)
                 smoke_exit_code = 9;
+            if (smoke_exit_code == 0) {
+                const auto source = project_->files.front().relative_path.string();
+                install_runtime_trace(atlas::Trace{
+                    {1, "site.create", "site.smoke", "source navigation", source, 1}});
+                DRAWITEMSTRUCT item{};
+                item.CtlID = id_runtime_canvas;
+                item.hwndItem = runtime_canvas_;
+                GetClientRect(runtime_canvas_, &item.rcItem);
+                item.hDC = GetDC(runtime_canvas_);
+                SendMessageW(window_, WM_DRAWITEM, id_runtime_canvas,
+                             reinterpret_cast<LPARAM>(&item));
+                ReleaseDC(runtime_canvas_, item.hDC);
+                if (runtime_hits_.empty()) smoke_exit_code = 12;
+                else {
+                    const auto box = runtime_hits_.front().box;
+                    SendMessageW(runtime_canvas_, WM_LBUTTONUP, 0,
+                                 MAKELPARAM((box.left + box.right) / 2,
+                                            (box.top + box.bottom) / 2));
+                    if (active_tab_ != 1 || !selected_ || selected_->file != 0 ||
+                        TabCtrl_GetCurSel(tabs_) != 1 ||
+                        window_text(status_).find(L"Call site:") != 0)
+                        smoke_exit_code = 12;
+                }
+            }
         }
         active_tab_ = 5;
         TabCtrl_SetCurSel(tabs_, active_tab_);
@@ -913,7 +962,7 @@ void App::update_tab() {
     EnableWindow(uml_all_, uml_overview_);
     for (HWND h : {expected_, actual_, browse_expected_, browse_actual_, compare_, results_})
         ShowWindow(h, compare ? SW_SHOW : SW_HIDE);
-    for (HWND h : {runtime_exe_, runtime_exe_browse_, runtime_record_,
+    for (HWND h : {runtime_exe_, runtime_exe_browse_, runtime_record_, runtime_test_,
                    runtime_path_, runtime_browse_, runtime_load_, runtime_prev_,
                    runtime_next_, runtime_timeline_, runtime_step_label_, runtime_canvas_})
         ShowWindow(h, runtime ? SW_SHOW : SW_HIDE);
@@ -947,7 +996,23 @@ void App::refresh_debug_view() {
 
 void App::record_runtime() {
     if (recording_ || scanning_) return;
+    if (debugger_.active()) {
+        show_error(L"Automatic capture", L"Stop the active debugger before recording a run.");
+        return;
+    }
     const fs::path executable(window_text(runtime_exe_));
+    const auto test_text = window_text(runtime_test_);
+    if (test_text.size() > 127 || std::any_of(test_text.begin(), test_text.end(),
+        [](wchar_t ch) {
+            return !((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') ||
+                     (ch >= L'0' && ch <= L'9') || ch == L'_' || ch == L'.' ||
+                     ch == L'-');
+        })) {
+        show_error(L"Automatic capture",
+                   L"Test ID must use at most 127 ASCII letters, digits, _, . or -.");
+        return;
+    }
+    const std::string test_id(test_text.begin(), test_text.end());
     std::error_code error;
     if (!fs::is_regular_file(executable, error)) {
         show_error(L"Automatic capture", L"Choose an existing instrumented .exe first.");
@@ -965,8 +1030,8 @@ void App::record_runtime() {
     EnableWindow(scan_, FALSE);
     set_status(L"Recording C++ allocations; waiting for the program to exit…");
     const HWND target = window_;
-    capture_worker_ = std::jthread([target, executable, output](std::stop_token stop) {
-        auto value = atlas::capture_runtime(executable, output, stop);
+    capture_worker_ = std::jthread([target, executable, output, test_id](std::stop_token stop) {
+        auto value = atlas::capture_runtime(executable, output, stop, test_id);
         auto result = std::make_unique<CaptureFinished>(CaptureFinished{std::move(value)});
         if (PostMessageW(target, capture_done_message, 0,
                          reinterpret_cast<LPARAM>(result.get()))) result.release();
@@ -1068,7 +1133,7 @@ atlas::UiReply App::handle_ui_command(const atlas::UiCommand& command) {
             problem = L"choose an existing .trace file";
             break;
         }
-        auto trace = atlas::read_trace(argument);
+        auto trace = atlas::read_trace(argument, {8 * 1024 * 1024, 10000, 64 * 1024});
         if (!trace) { problem = wide(trace.error()); break; }
         if (trace->size() > 10000) { problem = L"trace exceeds the 10,000-step UI limit"; break; }
         if (auto replay = atlas::replay_runtime(*trace, trace->size()); !replay) {
@@ -1105,6 +1170,7 @@ atlas::UiReply App::handle_ui_command(const atlas::UiCommand& command) {
         break;
     case atlas::UiAction::record_run:
         if (scanning_ || recording_) { problem = L"Atlas is busy"; break; }
+        if (debugger_.active()) { problem = L"stop the debugger before recording"; break; }
         if (!fs::is_regular_file(argument, path_error) || argument.extension() != L".exe") {
             problem = L"choose an existing instrumented .exe"; break;
         }
@@ -1184,6 +1250,7 @@ atlas::UiReply App::handle_ui_command(const atlas::UiCommand& command) {
         break;
     }
     case atlas::UiAction::debug_launch: {
+        if (recording_) { problem = L"finish the active capture before debugging"; break; }
         std::string error;
         if (!debugger_.launch(argument, error)) problem = wide(error);
         else {
@@ -1267,7 +1334,7 @@ atlas::UiReply App::handle_ui_command(const atlas::UiCommand& command) {
 
 void App::load_runtime() {
     const fs::path path(window_text(runtime_path_));
-    auto trace = atlas::read_trace(path);
+    auto trace = atlas::read_trace(path, {8 * 1024 * 1024, 10000, 64 * 1024});
     if (!trace) {
         show_error(L"Runtime trace", wide(trace.error()));
         return;
@@ -1306,6 +1373,7 @@ void App::set_runtime_step(std::size_t step) {
         return;
     }
     runtime_snapshot_ = std::move(*snapshot);
+    runtime_hits_.clear();
     interaction_graph_.reset();
     refresh_interactions();
     runtime_step_ = step;
@@ -1314,6 +1382,9 @@ void App::set_runtime_step(std::size_t step) {
     EnableWindow(runtime_next_, step < runtime_trace_->size());
     std::wstring description = L"Step " + std::to_wstring(step) + L" / " +
         std::to_wstring(runtime_trace_->size());
+    if (!runtime_snapshot_->test_id.empty())
+        description = L"Test " + wide(runtime_snapshot_->test_id) + L"   ·   " +
+                      description;
     if (step > 0) {
         const auto& event = (*runtime_trace_)[step - 1];
         description += L"   ·   " + wide(event.operation) + L"  " +
@@ -1955,6 +2026,14 @@ void App::diagram_clicked() {
 }
 
 LRESULT App::canvas_input(HWND canvas, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (canvas == runtime_canvas_) {
+        if (active_tab_ == 4 && message == WM_LBUTTONUP) {
+            runtime_clicked(POINT{static_cast<short>(LOWORD(lparam)),
+                                  static_cast<short>(HIWORD(lparam))});
+            return 0;
+        }
+        return DefSubclassProc(canvas, message, wparam, lparam);
+    }
     if (!uml_overview_ || active_tab_ != 3) return DefSubclassProc(canvas, message, wparam, lparam);
     const POINT point{static_cast<short>(LOWORD(lparam)),
                       static_cast<short>(HIWORD(lparam))};
@@ -2039,7 +2118,47 @@ LRESULT CALLBACK uml_canvas_proc(HWND canvas, UINT message, WPARAM wparam,
     return reinterpret_cast<App*>(data)->canvas_input(canvas, message, wparam, lparam);
 }
 
+void App::runtime_clicked(POINT point) {
+    for (const auto& hit : runtime_hits_) {
+        if (!PtInRect(&hit.box, point)) continue;
+        if (!project_) {
+            set_status(L"Scan the source project before opening a call site.");
+            return;
+        }
+        const fs::path source(hit.source_file);
+        const auto resolved_source = source.is_absolute() ? source
+            : project_->root / source;
+        for (std::size_t i = 0; i < project_->files.size(); ++i) {
+            std::error_code error;
+            const auto candidate = project_->root / project_->files[i].relative_path;
+            if (!fs::equivalent(resolved_source, candidate, error)) continue;
+            if (!focus_tree_item(TreeItem{i, std::nullopt})) break;
+            active_tab_ = 1;
+            TabCtrl_SetCurSel(tabs_, active_tab_);
+            update_tab();
+            if (hit.source_line > 0 && hit.source_line <= static_cast<std::size_t>(INT_MAX)) {
+                const auto offset = SendMessageW(detail_, EM_LINEINDEX,
+                    static_cast<WPARAM>(hit.source_line - 1), 0);
+                if (offset >= 0) {
+                    const auto length = SendMessageW(detail_, EM_LINELENGTH,
+                        static_cast<WPARAM>(offset), 0);
+                    SendMessageW(detail_, EM_SETSEL, static_cast<WPARAM>(offset),
+                                 static_cast<LPARAM>(offset + length));
+                    SendMessageW(detail_, EM_SCROLLCARET, 0, 0);
+                }
+            }
+            set_status(L"Call site: " + source.wstring() + L":" +
+                       std::to_wstring(hit.source_line));
+            return;
+        }
+        set_status(L"This call-site source is not in the scanned project: " +
+                   source.wstring());
+        return;
+    }
+}
+
 void App::draw_runtime(const DRAWITEMSTRUCT& item) {
+    runtime_hits_.clear();
     HDC dc = item.hDC;
     RECT area = item.rcItem;
     FillRect(dc, &area, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
@@ -2110,6 +2229,9 @@ void App::draw_runtime(const DRAWITEMSTRUCT& item) {
         const auto found = boxes.find(node.id);
         if (found == boxes.end()) continue;
         const RECT box = found->second;
+        if (!node.source_file.empty() && node.source_line > 0)
+            runtime_hits_.push_back(RuntimeSourceHit{
+                box, wide(node.source_file), node.source_line});
         HBRUSH brush = CreateSolidBrush(
             node.kind == atlas::RuntimeNodeKind::site ? RGB(243, 238, 223)
             : node.kind == atlas::RuntimeNodeKind::variable ? RGB(231, 240, 250)
@@ -2119,7 +2241,8 @@ void App::draw_runtime(const DRAWITEMSTRUCT& item) {
         FrameRect(dc, &box, reinterpret_cast<HBRUSH>(COLOR_WINDOWFRAME + 1));
         RECT title{box.left + 8, box.top + 4, box.right - 8, box.top + 23};
         RECT id{box.left + 8, box.top + 23, box.right - 8, box.bottom - 3};
-        SetTextColor(dc, RGB(32, 39, 48));
+        SetTextColor(dc, node.source_file.empty() ? RGB(32, 39, 48)
+                                               : RGB(31, 83, 154));
         const auto name = wide(node.label);
         DrawTextW(dc, name.c_str(), -1, &title, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         SetTextColor(dc, RGB(79, 88, 97));

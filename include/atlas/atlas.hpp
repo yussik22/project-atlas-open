@@ -63,6 +63,10 @@ struct SourceFile {
     std::uint64_t content_hash = 0;
     bool parsed = false;
     bool used_compile_command = false;
+    bool build_context_complete = false;
+    std::size_t compile_command_count = 0;
+    std::vector<std::string> effective_compile_arguments;
+    std::vector<std::string> ignored_compile_arguments;
     std::size_t error_diagnostic_count = 0;
     std::size_t warning_diagnostic_count = 0;
     std::vector<std::string> includes;
@@ -78,6 +82,9 @@ struct ProjectScan {
     std::vector<SourceFile> files;
     std::vector<fs::path> skipped_large_files;
 };
+
+[[nodiscard]] bool scan_parse_clean(const ProjectScan& scan);
+[[nodiscard]] bool scan_coverage_complete(const ProjectScan& scan);
 
 // AST outline from libclang. An optional compilation database directory improves
 // accuracy for projects with non-default includes, defines, and language flags.

@@ -1,7 +1,9 @@
 #include "atlas/capture.hpp"
+#include "atlas/dbghelp_guard.hpp"
 #include "atlas/runtime.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cwchar>
 #include <fstream>
@@ -31,11 +33,14 @@ std::string utf8(const wchar_t* value) {
 }
 
 bool enrich_sites(const std::filesystem::path& executable, Trace& trace) {
+    std::lock_guard symbols_lock(dbghelp_mutex());
     constexpr DWORD64 synthetic_base = 0x100000000ULL;
     const HANDLE process = GetCurrentProcess();
     const auto search_path = executable.parent_path().wstring();
     if (!SymInitializeW(process, search_path.c_str(), FALSE)) return false;
-    SymSetOptions(SymGetOptions() | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
+    const DWORD previous_options = SymGetOptions();
+    SymSetOptions((previous_options | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME) &
+                  ~SYMOPT_DEFERRED_LOADS);
     const auto loaded = SymLoadModuleExW(process, nullptr, executable.c_str(),
                                          nullptr, synthetic_base, 0, nullptr, 0);
     bool changed = false;
@@ -61,7 +66,13 @@ bool enrich_sites(const std::filesystem::path& executable, Trace& trace) {
             DWORD line_displacement = 0;
             if (SymGetLineFromAddrW64(process, loaded + offset,
                                      &line_displacement, &line)) {
-                if (line.FileName) {
+                if (line.FileName && line.LineNumber > 0) {
+                    const auto source = utf8(line.FileName);
+                    if (!source.empty() && std::all_of(source.begin(), source.end(),
+                        [](unsigned char c) { return c >= 0x20U && c != 0x7fU; })) {
+                        event.source_file = source;
+                        event.source_line = line.LineNumber;
+                    }
                     const auto filename = std::filesystem::path(line.FileName)
                                               .filename().wstring();
                     label += " @ " + utf8(filename.c_str()) + ':' +
@@ -77,7 +88,15 @@ bool enrich_sites(const std::filesystem::path& executable, Trace& trace) {
         SymUnloadModule64(process, loaded);
     }
     SymCleanup(process);
+    SymSetOptions(previous_options);
     return changed;
+}
+
+bool valid_test_id(std::string_view value) {
+    return !value.empty() && value.size() <= 127 &&
+        value.find_first_not_of(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-") ==
+            std::string_view::npos;
 }
 
 } // namespace
@@ -86,15 +105,19 @@ bool enrich_sites(const std::filesystem::path& executable, Trace& trace) {
 std::expected<CaptureResult, std::string> capture_runtime(
     const std::filesystem::path& executable,
     const std::filesystem::path& output,
-    std::stop_token stop) {
+    std::stop_token stop,
+    std::string_view test_id) {
 #ifndef _WIN32
     (void)executable;
     (void)output;
     (void)stop;
+    (void)test_id;
     return std::unexpected("automatic capture currently requires Windows");
 #else
     namespace fs = std::filesystem;
     try {
+        if (!test_id.empty() && !valid_test_id(test_id))
+            return std::unexpected("test ID must be 1-127 ASCII letters, digits, _, . or -");
         const auto program = fs::absolute(executable);
         const auto trace_path = fs::absolute(output);
         if (!fs::is_regular_file(program))
@@ -102,6 +125,22 @@ std::expected<CaptureResult, std::string> capture_runtime(
         if (fs::exists(trace_path))
             return std::unexpected("capture output already exists: " + trace_path.string());
         fs::create_directories(trace_path.parent_path());
+        static std::atomic<std::uint64_t> capture_sequence{0};
+        fs::path recording_path;
+        for (int attempt = 0; attempt < 16; ++attempt) {
+            recording_path = fs::path(trace_path.wstring() + L".capture-" +
+                std::to_wstring(GetCurrentProcessId()) + L"-" +
+                std::to_wstring(++capture_sequence) + L".tmp");
+            HANDLE reserved = CreateFileW(recording_path.c_str(), GENERIC_WRITE, 0,
+                nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (reserved != INVALID_HANDLE_VALUE) { CloseHandle(reserved); break; }
+            if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS)
+                return std::unexpected("cannot reserve capture output (Windows error " +
+                                       std::to_string(GetLastError()) + ')');
+            recording_path.clear();
+        }
+        if (recording_path.empty())
+            return std::unexpected("cannot reserve a unique capture output");
 
         std::vector<std::wstring> environment;
         LPWCH inherited = GetEnvironmentStringsW();
@@ -109,11 +148,16 @@ std::expected<CaptureResult, std::string> capture_runtime(
         for (const wchar_t* current = inherited; *current;
              current += std::wcslen(current) + 1) {
             std::wstring entry(current);
-            if (_wcsnicmp(entry.c_str(), L"ATLAS_RUNTIME_TRACE=", 20) != 0)
+            if (_wcsnicmp(entry.c_str(), L"ATLAS_RUNTIME_TRACE=", 20) != 0 &&
+                _wcsnicmp(entry.c_str(), L"ATLAS_TEST_ID=", 14) != 0)
                 environment.push_back(std::move(entry));
         }
         FreeEnvironmentStringsW(inherited);
-        environment.push_back(L"ATLAS_RUNTIME_TRACE=" + trace_path.wstring());
+        environment.push_back(L"ATLAS_RUNTIME_TRACE=" + recording_path.wstring());
+        if (!test_id.empty()) {
+            environment.push_back(L"ATLAS_TEST_ID=" +
+                std::wstring(test_id.begin(), test_id.end()));
+        }
         std::sort(environment.begin(), environment.end(),
                   [](const std::wstring& a, const std::wstring& b) {
                       return _wcsicmp(a.c_str(), b.c_str()) < 0;
@@ -151,33 +195,49 @@ std::expected<CaptureResult, std::string> capture_runtime(
         const BOOL got_exit = GetExitCodeProcess(process.hProcess, &exit_code);
         CloseHandle(process.hProcess);
         if (!got_exit) return std::unexpected("cannot read capture exit code");
-        if (!fs::exists(trace_path))
+        if (!fs::exists(recording_path))
             return std::unexpected("target produced no trace; link auto_runtime.cpp "
                                    "into its executable before capturing");
-        auto trace = read_trace(trace_path);
+        auto trace = read_trace(recording_path);
         if (!trace) return std::unexpected(trace.error());
+        if (trace->empty() || trace->back().operation != "capture.complete" ||
+            trace->back().resource != "capture" || trace->back().value != "ok")
+            return std::unexpected("capture has no complete terminal record; incomplete "
+                                   "trace retained at " + recording_path.string());
         if (auto replay = replay_runtime(*trace, trace->size()); !replay)
             return std::unexpected(replay.error());
-        const bool truncated = !trace->empty() &&
-            trace->back().operation == "capture.truncated";
+        const bool truncated = std::ranges::any_of(*trace, [](const TraceEvent& event) {
+            return event.operation == "capture.truncated";
+        });
+        fs::path raw_recording;
         if (enrich_sites(program, *trace)) {
-            const auto temporary = fs::path(trace_path.wstring() + L".symbolized.tmp");
-            const auto raw_copy = fs::path(trace_path.wstring() + L".raw");
-            if (!fs::exists(temporary) && !fs::exists(raw_copy)) {
-                {
-                    std::ofstream stream(temporary, std::ios::binary);
-                    if (stream) {
-                        TraceWriter writer(stream);
-                        for (const auto& event : *trace)
-                            writer.record(event.operation, event.resource, event.value);
-                    }
+            const auto temporary = fs::path(recording_path.wstring() + L".symbolized.tmp");
+            raw_recording = fs::path(recording_path.wstring() + L".raw");
+            bool written = false;
+            try {
+                std::ofstream stream(temporary, std::ios::binary);
+                if (stream) {
+                    TraceWriter writer(stream, TraceFormat::v2);
+                    for (const auto& event : *trace)
+                        writer.record(event.operation, event.resource, event.value,
+                                      event.source_file, event.source_line);
+                    stream.flush();
+                    written = static_cast<bool>(stream);
                 }
-                if (fs::exists(temporary) &&
-                    !ReplaceFileW(trace_path.c_str(), temporary.c_str(),
-                                  raw_copy.c_str(), 0, nullptr, nullptr)) {
-                    fs::remove(temporary);
-                }
+            } catch (...) { written = false; }
+            if (!written || !ReplaceFileW(recording_path.c_str(), temporary.c_str(),
+                                          raw_recording.c_str(), 0, nullptr, nullptr)) {
+                std::error_code ignored;
+                fs::remove(temporary, ignored);
+                raw_recording.clear();
             }
+        }
+        if (!MoveFileExW(recording_path.c_str(), trace_path.c_str(), MOVEFILE_WRITE_THROUGH))
+            return std::unexpected("cannot publish capture without overwriting another file; "
+                                   "trace retained at " + recording_path.string());
+        if (!raw_recording.empty()) {
+            const auto raw_copy = fs::path(trace_path.wstring() + L".raw");
+            MoveFileExW(raw_recording.c_str(), raw_copy.c_str(), MOVEFILE_WRITE_THROUGH);
         }
         return CaptureResult{trace_path, exit_code, truncated};
     } catch (const std::exception& error) {

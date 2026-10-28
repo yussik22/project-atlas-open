@@ -100,7 +100,8 @@ bool same_user(HANDLE pipe) {
 
 bool overlapped_operation(HANDLE pipe, std::stop_token stop,
                           const std::function<BOOL(OVERLAPPED*, DWORD*)>& start,
-                          DWORD& transferred) {
+                          DWORD& transferred,
+                          std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
     Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!event.value || event.value == INVALID_HANDLE_VALUE) return false;
     OVERLAPPED operation{};
@@ -108,7 +109,7 @@ bool overlapped_operation(HANDLE pipe, std::stop_token stop,
     if (start(&operation, &transferred)) return true;
     const DWORD error = GetLastError();
     if (error != ERROR_IO_PENDING) return false;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (!stop.stop_requested() && std::chrono::steady_clock::now() < deadline) {
         const DWORD waited = WaitForSingleObject(event.value, 100);
         if (waited == WAIT_OBJECT_0)
@@ -190,10 +191,31 @@ std::expected<UiReply, std::string> send_ui_command(
     DWORD received = 0;
     const auto name = pipe_name(pid.value_or(pids.front()));
     const DWORD timeout = action == UiAction::generate_cards ? 30000U : 3000U;
-    if (!CallNamedPipeW(name.c_str(), &command, sizeof(command), &reply,
-                        sizeof(reply), &received, timeout))
+    if (!WaitNamedPipeW(name.c_str(), timeout))
         return std::unexpected("Atlas GUI control channel unavailable (Windows error " +
                                std::to_string(GetLastError()) + ')');
+    Handle pipe(CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr));
+    if (pipe.value == INVALID_HANDLE_VALUE)
+        return std::unexpected("cannot open Atlas GUI control channel (Windows error " +
+                               std::to_string(GetLastError()) + ')');
+    DWORD written = 0;
+    if (!overlapped_operation(pipe.value, {},
+            [&](OVERLAPPED* operation, DWORD* count) {
+                return WriteFile(pipe.value, &command, sizeof(command), count, operation);
+            }, written) || written != sizeof(command))
+        return std::unexpected("cannot send Atlas GUI control request");
+    if (!overlapped_operation(pipe.value, {},
+            [&](OVERLAPPED* operation, DWORD* count) {
+                return ReadFile(pipe.value, &reply, sizeof(reply), count, operation);
+            }, received, std::chrono::milliseconds(timeout)))
+        return std::unexpected("Atlas GUI control response timed out");
+    const char acknowledgement = 1;
+    if (!overlapped_operation(pipe.value, {},
+            [&](OVERLAPPED* operation, DWORD* count) {
+                return WriteFile(pipe.value, &acknowledgement, 1, count, operation);
+            }, written) || written != 1)
+        return std::unexpected("cannot acknowledge Atlas GUI control response");
     if (received != sizeof(reply) || reply.magic != ui_protocol_magic ||
         reply.version != ui_protocol_version)
         return std::unexpected("Atlas GUI returned an incompatible control response");
@@ -250,7 +272,14 @@ void serve_ui_commands(std::stop_token stop, std::uint32_t pid,
             [&](OVERLAPPED* operation, DWORD* count) {
                 return WriteFile(pipe.value, &reply, sizeof(reply), count, operation);
             }, written);
-        if (sent && written == sizeof(reply)) FlushFileBuffers(pipe.value);
+        if (sent && written == sizeof(reply)) {
+            char acknowledgement = 0;
+            DWORD received_ack = 0;
+            overlapped_operation(pipe.value, stop,
+                [&](OVERLAPPED* operation, DWORD* count) {
+                    return ReadFile(pipe.value, &acknowledgement, 1, count, operation);
+                }, received_ack);
+        }
         DisconnectNamedPipe(pipe.value);
     }
 #else

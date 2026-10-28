@@ -4,6 +4,7 @@
 #include "atlas/symbol_identity.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <iomanip>
 #include <set>
@@ -11,11 +12,105 @@
 #include <string_view>
 #include <system_error>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace atlas {
 namespace {
 
 constexpr std::string_view marker_name = ".project-atlas-generated";
 constexpr std::string_view card_marker = "<!-- Project Atlas generated card -->";
+
+std::expected<void, std::string> safe_report_path(const fs::path& path) {
+    std::error_code ec;
+    const auto absolute = fs::absolute(path, ec).lexically_normal();
+    if (ec) return std::unexpected("cannot resolve report path: " + path.string());
+    fs::path current = absolute.root_path();
+    for (const auto& part : absolute.relative_path()) {
+        current /= part;
+#ifdef _WIN32
+        const DWORD attributes = GetFileAttributesW(current.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) continue;
+            return std::unexpected("cannot inspect report path: " + current.string());
+        }
+        if (attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+            return std::unexpected("report path crosses a reparse point: " + current.string());
+#else
+        const auto status = fs::symlink_status(current, ec);
+        if (ec == std::errc::no_such_file_or_directory) { ec.clear(); continue; }
+        if (ec) return std::unexpected("cannot inspect report path: " + current.string());
+        if (fs::is_symlink(status))
+            return std::unexpected("report path crosses a symlink: " + current.string());
+#endif
+    }
+    return {};
+}
+
+class StagedOutput : public std::ofstream {
+public:
+    explicit StagedOutput(fs::path target) : target_(std::move(target)) {
+        if (auto safe = safe_report_path(target_); !safe) {
+            error_ = safe.error();
+            setstate(std::ios::failbit);
+            return;
+        }
+        static std::atomic<std::uint64_t> next{0};
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            temporary_ = target_;
+            temporary_ += ".atlas-" + std::to_string(++next) + ".tmp";
+#ifdef _WIN32
+            HANDLE reserved = CreateFileW(temporary_.c_str(), GENERIC_WRITE, 0, nullptr,
+                                          CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (reserved == INVALID_HANDLE_VALUE) continue;
+            CloseHandle(reserved);
+#else
+            if (fs::exists(temporary_)) continue;
+#endif
+            open(temporary_, std::ios::binary);
+            if (is_open()) return;
+            break;
+        }
+        error_ = "cannot create staged report file: " + target_.string();
+        setstate(std::ios::failbit);
+    }
+    ~StagedOutput() {
+        if (is_open()) close();
+        if (!committed_ && !temporary_.empty()) {
+            std::error_code ignored;
+            fs::remove(temporary_, ignored);
+        }
+    }
+    std::expected<void, std::string> commit() {
+        if (!*this) return std::unexpected(error_.empty() ?
+            "cannot complete report file: " + target_.string() : error_);
+        flush();
+        if (!*this) return std::unexpected("cannot flush report file: " + target_.string());
+        close();
+        if (!*this) return std::unexpected("cannot close report file: " + target_.string());
+        if (auto safe = safe_report_path(target_); !safe) return safe;
+#ifdef _WIN32
+        const DWORD attributes = GetFileAttributesW(target_.c_str());
+        const bool replaced = attributes == INVALID_FILE_ATTRIBUTES
+            ? MoveFileExW(temporary_.c_str(), target_.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE
+            : ReplaceFileW(target_.c_str(), temporary_.c_str(), nullptr, 0,
+                           nullptr, nullptr) != FALSE;
+        if (!replaced) return std::unexpected("cannot publish report file: " + target_.string());
+#else
+        std::error_code ec;
+        fs::rename(temporary_, target_, ec);
+        if (ec) return std::unexpected("cannot publish report file: " + ec.message());
+#endif
+        committed_ = true;
+        return {};
+    }
+private:
+    fs::path target_, temporary_;
+    std::string error_;
+    bool committed_ = false;
+};
 
 std::string utf8_path(const fs::path& path) {
     const auto value = path.generic_u8string();
@@ -90,6 +185,8 @@ fs::path summary_relative_path(const SourceFile& file) {
 
 std::expected<void, std::string> prepare_output(
     const fs::path& root, const fs::path& output) {
+    if (auto safe = safe_report_path(output); !safe) return safe;
+    if (auto safe = safe_report_path(output / marker_name); !safe) return safe;
     std::error_code ec;
     const auto absolute_output = fs::weakly_canonical(output, ec);
     if (ec || absolute_output == root) {
@@ -110,12 +207,12 @@ std::expected<void, std::string> prepare_output(
             return std::unexpected("cannot create output directory: " + ec.message());
         }
     }
-    std::ofstream marker(output / marker_name, std::ios::binary);
+    StagedOutput marker(output / marker_name);
     if (!marker) {
         return std::unexpected("cannot write Project Atlas marker");
     }
     marker << "Generated files only. Keep human contracts outside this directory.\n";
-    return {};
+    return marker.commit();
 }
 
 std::expected<void, std::string> write_card(
@@ -126,7 +223,7 @@ std::expected<void, std::string> write_card(
     if (ec) {
         return std::unexpected("cannot create report directory: " + ec.message());
     }
-    std::ofstream out(target, std::ios::binary);
+    StagedOutput out(target);
     if (!out) {
         return std::unexpected("cannot write source card: " + target.string());
     }
@@ -220,10 +317,7 @@ std::expected<void, std::string> write_card(
             out << "- " << escape_markdown(diagnostic) << "\n";
         }
     }
-    if (!out) {
-        return std::unexpected("cannot complete source card: " + target.string());
-    }
-    return {};
+    return out.commit();
 }
 
 std::expected<void, std::string> write_summary(
@@ -232,7 +326,7 @@ std::expected<void, std::string> write_summary(
     std::error_code ec;
     fs::create_directories(target.parent_path(), ec);
     if (ec) return std::unexpected("cannot create summary directory: " + ec.message());
-    std::ofstream out(target, std::ios::binary);
+    StagedOutput out(target);
     if (!out) return std::unexpected("cannot write source summary: " + target.string());
     const auto detail = (output / card_relative_path(file))
         .lexically_relative(target.parent_path());
@@ -265,13 +359,12 @@ std::expected<void, std::string> write_summary(
         if (file.functions.size() > 4)
             out << "- " << file.functions.size() - 4 << " more in the full card\n";
     }
-    return out ? std::expected<void, std::string>{}
-               : std::unexpected("cannot complete source summary: " + target.string());
+    return out.commit();
 }
 
 std::expected<void, std::string> write_index(
     const ProjectScan& scan, const fs::path& output) {
-    std::ofstream out(output / "index.md", std::ios::binary);
+    StagedOutput out(output / "index.md");
     if (!out) {
         return std::unexpected("cannot write index.md");
     }
@@ -324,8 +417,7 @@ std::expected<void, std::string> write_index(
             out << "- `" << escape_markdown(utf8_path(path)) << "`\n";
         }
     }
-    return out ? std::expected<void, std::string>{}
-               : std::unexpected("cannot complete index.md");
+    return out.commit();
 }
 
 std::expected<void, std::string> write_classes(
@@ -356,7 +448,7 @@ std::expected<void, std::string> write_classes(
             return std::unexpected("symbol ID hash collision; cannot write class diagram");
         }
     }
-    std::ofstream out(output / "classes.md", std::ios::binary);
+    StagedOutput out(output / "classes.md");
     if (!out) {
         return std::unexpected("cannot write classes.md");
     }
@@ -372,8 +464,7 @@ std::expected<void, std::string> write_classes(
             << mermaid_symbol_id(derived) << '\n';
     }
     out << "```\n";
-    return out ? std::expected<void, std::string>{}
-               : std::unexpected("cannot complete classes.md");
+    return out.commit();
 }
 
 std::expected<void, std::string> write_calls(
@@ -394,7 +485,7 @@ std::expected<void, std::string> write_calls(
                 ++links[{file.relative_path, call.callee_file}];
         }
     }
-    std::ofstream out(output / "calls.md", std::ios::binary);
+    StagedOutput out(output / "calls.md");
     if (!out) return std::unexpected("cannot write calls.md");
     out << "# Static call map\n\n"
         << "Libclang-resolved call expressions in scanned source bodies. This is "
@@ -431,14 +522,13 @@ std::expected<void, std::string> write_calls(
                 << " | " << escape_markdown(utf8_path(paths.second))
                 << " | " << count << " |\n";
     } else out << "No resolved cross-file calls.\n";
-    return out ? std::expected<void, std::string>{}
-               : std::unexpected("cannot complete calls.md");
+    return out.commit();
 }
 
 std::expected<void, std::string> write_interactions(
     const ProjectScan& scan, const fs::path& output) {
     const auto graph = build_interaction_graph(scan);
-    std::ofstream out(output / "interactions.md", std::ios::binary);
+    StagedOutput out(output / "interactions.md");
     if (!out) return std::unexpected("cannot write interactions.md");
     out << "# Interaction evidence map\n\n"
         << "Source-file view of AST inheritance, field types, and resolved call sites. "
@@ -476,13 +566,12 @@ std::expected<void, std::string> write_interactions(
             << " | " << escape_markdown(edge.detail)
             << " | " << edge.count << " | " << edge.first_line << " |\n";
     }
-    return out ? std::expected<void, std::string>{}
-               : std::unexpected("cannot complete interactions.md");
+    return out.commit();
 }
 
 std::expected<void, std::string> write_html(
     const ProjectScan& scan, const fs::path& output) {
-    std::ofstream out(output / "index.html", std::ios::binary);
+    StagedOutput out(output / "index.html");
     if (!out) {
         return std::unexpected("cannot write index.html");
     }
@@ -517,8 +606,7 @@ std::expected<void, std::string> write_html(
         << "q.addEventListener('input',()=>{const v=q.value.toLocaleLowerCase();"
         << "for(const e of document.querySelectorAll('#files li'))"
         << "e.hidden=!e.dataset.search.toLocaleLowerCase().includes(v)});</script></html>\n";
-    return out ? std::expected<void, std::string>{}
-               : std::unexpected("cannot complete index.html");
+    return out.commit();
 }
 
 } // namespace
@@ -538,6 +626,7 @@ std::expected<void, std::string> write_project_report(
     if (place_cards_next_to_source) {
         for (const auto& file : scan.files) {
             const auto target = scan.root / card_relative_path(file);
+            if (auto safe = safe_report_path(target); !safe) return safe;
             std::error_code ec;
             if (!fs::exists(target, ec)) continue;
             if (ec || !fs::is_regular_file(target, ec) || fs::is_symlink(target, ec)) {
@@ -552,6 +641,16 @@ std::expected<void, std::string> write_project_report(
                                        target.string());
             }
         }
+    }
+    for (const auto& name : {"index.md", "classes.md", "calls.md",
+                             "interactions.md", "index.html"}) {
+        if (auto safe = safe_report_path(output_directory / name); !safe) return safe;
+    }
+    for (const auto& file : scan.files) {
+        if (auto safe = safe_report_path(output_directory / card_relative_path(file)); !safe)
+            return safe;
+        if (auto safe = safe_report_path(output_directory / summary_relative_path(file)); !safe)
+            return safe;
     }
     if (auto result = prepare_output(scan.root, output_directory); !result) {
         return result;

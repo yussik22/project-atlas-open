@@ -1,4 +1,5 @@
 #include "atlas/debugger.hpp"
+#include "atlas/dbghelp_guard.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -18,6 +19,7 @@
 #endif
 #include <windows.h>
 #include <dbghelp.h>
+#include <tlhelp32.h>
 #endif
 
 namespace atlas {
@@ -62,6 +64,36 @@ struct Handle {
     Handle(const Handle&) = delete;
     Handle& operator=(const Handle&) = delete;
 };
+
+void resume_threads(std::vector<HANDLE>& threads) {
+    for (HANDLE thread : threads) {
+        ResumeThread(thread);
+        CloseHandle(thread);
+    }
+    threads.clear();
+}
+
+bool suspend_other_threads(DWORD process_id, DWORD active_thread,
+                           std::vector<HANDLE>& suspended) {
+    Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0));
+    if (snapshot.value == INVALID_HANDLE_VALUE) return false;
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    if (!Thread32First(snapshot.value, &entry)) return false;
+    do {
+        if (entry.th32OwnerProcessID != process_id ||
+            entry.th32ThreadID == active_thread) continue;
+        HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID);
+        if (!thread) { resume_threads(suspended); return false; }
+        if (SuspendThread(thread) == static_cast<DWORD>(-1)) {
+            CloseHandle(thread);
+            resume_threads(suspended);
+            return false;
+        }
+        suspended.push_back(thread);
+    } while (Thread32Next(snapshot.value, &entry));
+    return true;
+}
 
 struct Frame {
     std::uint64_t address = 0;
@@ -280,6 +312,8 @@ struct NativeDebugger::Impl {
         state.phase = "running";
         publish(state);
         DebugSetProcessKillOnExit(TRUE);
+        std::lock_guard symbols_lock(dbghelp_mutex());
+        const DWORD previous_symbol_options = SymGetOptions();
         SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
         const bool symbols_ready = SymInitializeW(process.value,
             working_directory.c_str(), FALSE) != FALSE;
@@ -289,6 +323,8 @@ struct NativeDebugger::Impl {
         bool stepping = false;
         bool rearm_step = false;
         std::uint64_t rearm_address = 0;
+        DWORD rearm_thread_id = 0;
+        std::vector<HANDLE> suspended_threads;
         std::string step_file;
         std::uint32_t step_line = 0;
         std::uint32_t step_count = 0;
@@ -368,6 +404,12 @@ struct NativeDebugger::Impl {
                 step_file = state.frames.empty() ? "" : state.frames.front().file;
                 step_line = state.frames.empty() ? 0 : state.frames.front().line;
                 if (stepping || rearm_address) {
+                    if (rearm_address && event.dwThreadId != rearm_thread_id) {
+                        state.phase = "error";
+                        state.error = "breakpoint rearm thread changed unexpectedly";
+                        publish(state);
+                        break;
+                    }
                     Handle thread(OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
                                              FALSE, event.dwThreadId));
                     CONTEXT context{};
@@ -386,18 +428,45 @@ struct NativeDebugger::Impl {
                         break;
                     }
                 }
+                if (rearm_address && !suspend_other_threads(
+                        event.dwProcessId, rearm_thread_id, suspended_threads)) {
+                    state.phase = "error";
+                    state.error = "cannot suspend other threads for breakpoint rearm";
+                    publish(state);
+                    break;
+                }
                 state.phase = "running";
                 state.reason.clear();
                 state.frames.clear();
                 state.variables.clear();
                 publish(state);
                 paused = false;
-                ContinueDebugEvent(event.dwProcessId, event.dwThreadId, pending_status);
+                if (!ContinueDebugEvent(event.dwProcessId, event.dwThreadId,
+                                        pending_status)) {
+                    state.phase = "error";
+                    state.error = "cannot resume paused debug event: " +
+                                  system_error(GetLastError());
+                    publish(state);
+                    break;
+                }
                 has_event = false;
                 continue;
             }
             DWORD decision = DBG_CONTINUE;
             switch (event.dwDebugEventCode) {
+            case CREATE_THREAD_DEBUG_EVENT:
+                if (rearm_address && event.dwThreadId != rearm_thread_id) {
+                    HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME, FALSE,
+                                               event.dwThreadId);
+                    if (!thread || SuspendThread(thread) == static_cast<DWORD>(-1)) {
+                        if (thread) CloseHandle(thread);
+                        state.phase = "error";
+                        state.error = "cannot suspend new thread during breakpoint rearm";
+                    } else suspended_threads.push_back(thread);
+                }
+                if (event.u.CreateThread.hThread)
+                    CloseHandle(event.u.CreateThread.hThread);
+                break;
             case CREATE_PROCESS_DEBUG_EVENT:
                 if (symbols_ready) SymLoadModuleExW(process.value,
                     event.u.CreateProcessInfo.hFile, executable.c_str(), nullptr,
@@ -420,6 +489,43 @@ struct NativeDebugger::Impl {
                     auto bp = std::find_if(state.breakpoints.begin(), state.breakpoints.end(),
                         [&](const Breakpoint& item) { return item.verified && item.address == address; });
                     if (bp != state.breakpoints.end()) {
+                        if (rearm_address) {
+                            // A second thread may have executed INT3 before the first
+                            // breakpoint event was delivered. Defer it until the active
+                            // thread executes the restored instruction and re-arms INT3.
+                            Handle thread(OpenThread(THREAD_GET_CONTEXT |
+                                                     THREAD_SET_CONTEXT |
+                                                     THREAD_SUSPEND_RESUME,
+                                                     FALSE, event.dwThreadId));
+                            CONTEXT context{};
+                            context.ContextFlags = CONTEXT_CONTROL;
+                            if (!thread.value || !GetThreadContext(thread.value, &context)) {
+                                state.phase = "error";
+                                state.error = "cannot inspect concurrent breakpoint thread";
+                                break;
+                            }
+                            context.Rip = address;
+                            context.EFlags &= ~0x100U;
+                            if (!SetThreadContext(thread.value, &context)) {
+                                state.phase = "error";
+                                state.error = "cannot rewind concurrent breakpoint thread";
+                                break;
+                            }
+                            const bool already_suspended = std::ranges::any_of(
+                                suspended_threads, [&](HANDLE other) {
+                                    return GetThreadId(other) == event.dwThreadId;
+                                });
+                            if (!already_suspended) {
+                                if (SuspendThread(thread.value) == static_cast<DWORD>(-1)) {
+                                    state.phase = "error";
+                                    state.error = "cannot defer concurrent breakpoint thread";
+                                    break;
+                                }
+                                suspended_threads.push_back(thread.value);
+                                thread.value = nullptr;
+                            }
+                            break;
+                        }
                         if (!write_byte(process.value, bp->address, bp->original)) {
                             state.phase = "error";
                             state.error = "cannot restore instruction at breakpoint";
@@ -442,6 +548,7 @@ struct NativeDebugger::Impl {
                             break;
                         }
                         rearm_address = address;
+                        rearm_thread_id = event.dwThreadId;
                         state.reason = "breakpoint";
                         paused = true;
                     } else if (!initial_break) {
@@ -451,13 +558,36 @@ struct NativeDebugger::Impl {
                     }
                 } else if (code == EXCEPTION_SINGLE_STEP) {
                     if (rearm_address) {
+                        if (event.dwThreadId != rearm_thread_id) {
+                            state.phase = "error";
+                            state.error = "unexpected thread single-stepped during breakpoint rearm";
+                            break;
+                        }
                         if (!write_byte(process.value, rearm_address, 0xcc)) {
                             state.phase = "error";
                             state.error = "cannot re-arm breakpoint";
                             break;
                         }
                         rearm_address = 0;
-                        if (!rearm_step && !stepping) break;
+                        rearm_thread_id = 0;
+                        resume_threads(suspended_threads);
+                        if (!rearm_step && !stepping) {
+                            Handle thread(OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT,
+                                                     FALSE, event.dwThreadId));
+                            CONTEXT context{};
+                            context.ContextFlags = CONTEXT_CONTROL;
+                            if (!thread.value || !GetThreadContext(thread.value, &context)) {
+                                state.phase = "error";
+                                state.error = "cannot clear trap flag after breakpoint rearm";
+                                break;
+                            }
+                            context.EFlags &= ~0x100U;
+                            if (!SetThreadContext(thread.value, &context)) {
+                                state.phase = "error";
+                                state.error = "cannot update trap flag after breakpoint rearm";
+                            }
+                            break;
+                        }
                     }
                     if (stepping) {
                         ++step_count;
@@ -515,10 +645,17 @@ struct NativeDebugger::Impl {
             }
             if (state.phase == "error") { publish(state); break; }
             if (paused) continue;
-            ContinueDebugEvent(event.dwProcessId, event.dwThreadId, decision);
+            if (!ContinueDebugEvent(event.dwProcessId, event.dwThreadId, decision)) {
+                state.phase = "error";
+                state.error = "cannot continue debug event: " +
+                              system_error(GetLastError());
+                publish(state);
+                break;
+            }
             has_event = false;
             if (state.phase == "exited") break;
         }
+        resume_threads(suspended_threads);
         if (state.phase != "exited" && (stop.stop_requested() || state.phase == "error")) {
             TerminateProcess(process.value, 0);
             if (has_event) ContinueDebugEvent(event.dwProcessId, event.dwThreadId, DBG_CONTINUE);
@@ -531,6 +668,7 @@ struct NativeDebugger::Impl {
             publish(state);
         }
         if (symbols_ready) SymCleanup(process.value);
+        SymSetOptions(previous_symbol_options);
     }
 #else
     std::string phase = "unavailable";
@@ -653,6 +791,16 @@ bool NativeDebugger::stop(std::string& error) {
     return true;
 #else
     error = "the embedded debugger currently requires Windows";
+    return false;
+#endif
+}
+
+bool NativeDebugger::active() const {
+#ifdef _WIN32
+    std::lock_guard lock(impl_->mutex);
+    const auto& phase = impl_->snapshot.phase;
+    return phase == "launching" || phase == "running" || phase == "paused";
+#else
     return false;
 #endif
 }

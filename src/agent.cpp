@@ -153,6 +153,13 @@ void write_file(std::ostream& out, const ProjectScan& scan, const SourceFile& fi
         << ",\"content_hash_fnv1a64\":" << json_string(hex64(file.content_hash))
         << ",\"ast_created\":" << (file.parsed ? "true" : "false")
         << ",\"compile_command_found\":" << (file.used_compile_command ? "true" : "false")
+        << ",\"build_context_complete\":" << (file.build_context_complete ? "true" : "false")
+        << ",\"compile_command_count\":" << file.compile_command_count
+        << ",\"effective_compile_arguments\":";
+    write_strings(out, file.effective_compile_arguments);
+    out << ",\"ignored_compile_arguments\":";
+    write_strings(out, file.ignored_compile_arguments);
+    out
         << ",\"clang_errors\":" << file.error_diagnostic_count
         << ",\"clang_warnings\":" << file.warning_diagnostic_count
         << ",\"includes\":";
@@ -231,7 +238,14 @@ std::string agent_scan_json(const ProjectScan& scan,
         << ",\"clang_errors\":" << errors
         << ",\"clang_warnings\":" << warnings
         << ",\"call_sites\":" << total_calls
-        << ",\"clean\":" << ((ast_failures == 0 && errors == 0) ? "true" : "false")
+        << ",\"parse_clean\":" << (scan_parse_clean(scan) ? "true" : "false")
+        << ",\"coverage_complete\":" << (scan_coverage_complete(scan) ? "true" : "false")
+        << ",\"clean\":" << (scan_coverage_complete(scan) ? "true" : "false")
+        << ",\"build_context_incomplete_files\":" <<
+            std::ranges::count_if(scan.files, [](const SourceFile& file) {
+                return !file.build_context_complete;
+            })
+        << ",\"skipped_large_count\":" << scan.skipped_large_files.size()
         << "},\"query\":";
     if (query) out << json_string(*query);
     else out << "null";
@@ -315,7 +329,14 @@ std::string agent_trace_json(const TraceComparison& comparison) {
         out << "{\"step\":" << event->step
             << ",\"operation\":" << json_string(event->operation)
             << ",\"resource\":" << json_string(event->resource)
-            << ",\"value\":" << json_string(event->value) << '}';
+            << ",\"value\":" << json_string(event->value)
+            << ",\"source_file\":";
+        if (event->source_file.empty()) out << "null";
+        else out << json_string(event->source_file);
+        out << ",\"source_line\":";
+        if (event->source_line == 0) out << "null";
+        else out << event->source_line;
+        out << '}';
     };
     std::ostringstream out;
     out << "{\"schema\":\"project-atlas.agent.v1\",\"operation\":\"trace\""
@@ -343,7 +364,10 @@ std::string agent_runtime_json(const RuntimeSnapshot& snapshot) {
         << ",\"step\":" << snapshot.step
         << ",\"total_steps\":" << snapshot.total_steps
         << ",\"capture_truncated\":" << (snapshot.capture_truncated ? "true" : "false")
-        << ",\"nodes\":[";
+        << ",\"test_id\":";
+    if (snapshot.test_id.empty()) out << "null";
+    else out << json_string(snapshot.test_id);
+    out << ",\"nodes\":[";
     for (std::size_t i = 0; i < snapshot.nodes.size(); ++i) {
         if (i) out << ',';
         const auto& node = snapshot.nodes[i];
@@ -351,7 +375,14 @@ std::string agent_runtime_json(const RuntimeSnapshot& snapshot) {
             << ",\"label\":" << json_string(node.label)
             << ",\"kind\":" << json_string(
                 node.kind == RuntimeNodeKind::variable ? "variable"
-                : node.kind == RuntimeNodeKind::site ? "site" : "object") << '}';
+                : node.kind == RuntimeNodeKind::site ? "site" : "object")
+            << ",\"source_file\":";
+        if (node.source_file.empty()) out << "null";
+        else out << json_string(node.source_file);
+        out << ",\"source_line\":";
+        if (node.source_line == 0) out << "null";
+        else out << node.source_line;
+        out << '}';
     }
     out << "],\"links\":[";
     for (std::size_t i = 0; i < snapshot.links.size(); ++i) {
